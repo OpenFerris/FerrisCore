@@ -1,0 +1,41 @@
+[package]
+name = "ferris-schema"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "Schema registry, wire contract and migration engine for Ferris"
+
+[lib]
+# `rlib` only. This crate is the one thing a wasm32 Desk build compiles from
+# the framework, and it must never end up as a dynamic library target there.
+crate-type = ["rlib"]
+
+[features]
+# The registry, migrations and customization run against a live database, so
+# they need `ferris-core` and `ferris-db`. `ferris-db` is the only thing that
+# depends on `sqlx`, so keeping it behind `native` keeps the driver out of the
+# graph entirely.
+#
+# The canonical wire contract in `contract` needs none of that: it is pure
+# serde. `ferris-web` therefore depends on this crate with
+# `default-features = false`, and a plain `cargo check` of the Desk — or the
+# wasm32 hydrate build — compiles `contract` and nothing else. Turning `native`
+# on is what puts the backend back in the graph, so the split is opt-in on the
+# frontend and only paid for when SSR actually bridges into the engine.
+default = ["native"]
+native = ["dep:ferris-core", "dep:ferris-db"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ferris-core = { path = "../ferris-core", optional = true }
+ferris-db = { path = "../ferris-db", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

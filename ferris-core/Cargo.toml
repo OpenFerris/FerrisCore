@@ -1,0 +1,33 @@
+[package]
+name = "ferris-core"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "Core types, traits, and error handling for Ferris"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+figment = { version = "0.10", features = ["toml", "env", "yaml"] }
+dirs = { version = "5.0" }
+# AES-256-GCM for `Secret` fields. Native-only by construction: this crate is
+# not in the wasm32 hydrate graph (see `ferris-schema`'s `native` feature).
+ring = { workspace = true }
+base64 = { workspace = true }
+# Reads `apps/<app>/plugin.toml` and writes each instance's `config.toml`. The
+# crate is already in `Cargo.lock` (0.8.23, through `figment`'s `toml` feature),
+# so this is a direct edge to an already-compiled parser, not a new crate, TLS
+# stack or binary-size cost.
+toml = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true }

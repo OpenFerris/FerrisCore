@@ -1,0 +1,31 @@
+[package]
+name = "ferris-document"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "Document model for Ferris framework"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferris-core = { path = "../ferris-core" }
+ferris-db = { path = "../ferris-db" }
+ferris-schema = { path = "../ferris-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# For the one `debug!` in `engine::list` that names which list filters could not
+# be pushed into SQL. Without it the fallback is only discoverable by reading the
+# source, and a slow list would be undiagnosable in a running site.
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+ferris-macro = { path = "../ferris-macro" }

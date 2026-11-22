@@ -1,0 +1,25 @@
+[package]
+name = "ferris-web-shared"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "Wire contract, metadata helpers and locale tables for the Ferris Desk (no Leptos)"
+
+[lib]
+# Plain rlib: this crate is a leaf of the `ferris-web` graph and is never
+# loaded as a wasm artifact on its own.
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# `default-features = false` keeps `ferris-schema/native` (registry, sqlx) out:
+# this crate is the browser-neutral leaf and never reads the registry.
+ferris-schema = { path = "../ferris-schema", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = "0.3"

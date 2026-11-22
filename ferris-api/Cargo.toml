@@ -1,0 +1,35 @@
+[package]
+name = "ferris-api"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "ferris-api for Ferris framework"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferris-core = { path = "../ferris-core" }
+ferris-db = { path = "../ferris-db" }
+ferris-auth = { path = "../ferris-auth" }
+ferris-schema = { path = "../ferris-schema" }
+ferris-document = { path = "../ferris-document" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+# The OAuth login is an HTTP flow: its tests drive the router and mock the
+# provider's token/userinfo endpoints (AGENTS §4: the only sanctioned way to
+# exercise an external HTTP dependency).
+wiremock = "0.6"

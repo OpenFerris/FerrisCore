@@ -1,0 +1,79 @@
+[package]
+name = "ferris-web-ui"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "Leptos components, hooks and style helpers for the Ferris Desk"
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Mirror of the `ferris-web` features of the same name, so the caller picks the
+# rendering mode once. Duplicating the plumbing here would let the two crates
+# disagree about whether they are being compiled for the browser or the server.
+ssr = ["leptos/ssr", "leptos/nonce"]
+hydrate = ["leptos/hydrate"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
+[dependencies]
+ferris-web-shared = { path = "../ferris-web-shared" }
+
+leptos = { workspace = true }
+leptos_router = { version = "0.8" }
+leptos_ui = { version = "0.3.22" }
+tw_merge = { version = "0.1.21", features = ["variant"] }
+icons = { version = "0.18.3", features = ["leptos"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { version = "0.3", features = ["wasm-bindgen"] }
+strum = "0.28.0"
+validator = { workspace = true }
+js-sys = "0.3.105"
+wasm-bindgen = "0.2"
+
+web-sys = { version = "0.3", default-features = false, features = [
+    "console",
+    "CssStyleDeclaration",
+    "Document",
+    "DomRect",
+    "DomTokenList",
+    "DragEvent",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "HtmlMediaElement",
+    "HtmlVideoElement",
+    "MediaDevices",
+    "MediaStream",
+    "MediaStreamConstraints",
+    "MediaStreamTrack",
+    "HtmlInputElement",
+    "HtmlScriptElement",
+    "InputEvent",
+    "KeyboardEvent",
+    "Location",
+    "MediaQueryList",
+    "MouseEvent",
+    "MutationObserver",
+    "MutationObserverInit",
+    "MutationRecord",
+    "Navigator",
+    "Node",
+    "NodeList",
+    "Storage",
+    "Url",
+    "Window",
+] }
