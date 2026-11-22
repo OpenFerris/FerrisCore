@@ -190,8 +190,10 @@ Therefore:
   types those layers consume.
 - A change that crosses the boundary is prepared on same-named branches in both
   repositories, with the Core PR first (Framework CI checks out `FerrisCore`).
-- Framework CI checks out this repository at `../FerrisCore`; a `master` or
-  `develop` break here blocks it. Do not push a red base branch.
+- Framework CI checks out this repository as the sibling `FerrisCore` next to its
+  `framework/` checkout, so `../../FerrisCore` resolves; each job checks out both
+  repositories. A `master` or `develop` break here blocks it. Do not push a red
+  base branch.
 
 ---
 
@@ -233,7 +235,8 @@ Notes:
 | `hotfix/*` | Urgent patch from `master`; merged into `master` and `develop`. |
 
 - Protected branches: direct pushes to `master` and `develop` are disabled; a PR
-  and the `CI` workflow are required.
+  and the `CI` workflow are required. The required checks are `Format`, `Check`
+  and `Test`.
 - Commit subjects: `feat(scope): …`, `fix(scope): …`, `refactor(…): …`,
   `docs(…): …`, `wip: …`. The body states what changed and why.
 - `Cargo.lock` is **tracked** and updated by `cargo`, never by hand.
