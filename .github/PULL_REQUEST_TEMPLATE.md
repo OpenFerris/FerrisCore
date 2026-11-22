@@ -1,31 +1,20 @@
-## Description
+## What changed
 
-Please include a summary of the changes and the related issue. Please also include relevant motivation and context.
+<!-- One paragraph. State the behaviour, not the file list. -->
 
-Fixes # (issue)
+## Why
 
-## Type of change
+<!-- The problem this solves and the decision behind it. Link an issue if there is one. -->
 
-Please delete options that are not relevant.
+## Gates
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --workspace --all-targets`
+- [ ] `cargo check --workspace --all-targets`
+- [ ] `cargo test --workspace -j 2 -- --test-threads=1`
+- [ ] Regression test added for a bug fix
+- [ ] Public API change documented and coordinated with FerrisFramework
 
-## How Has This Been Tested?
+## Notes
 
-Please describe the tests that you ran to verify your changes. Provide instructions so we can reproduce.
-
-- [ ] Test A
-- [ ] Test B
-
-## Checklist
-
-- [ ] My code follows the style guidelines of this project
-- [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
+<!-- Anything left unverified, knowingly skipped, or needing a reviewer's attention. -->
