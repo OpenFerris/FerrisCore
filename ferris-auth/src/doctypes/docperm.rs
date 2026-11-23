@@ -19,6 +19,8 @@ pub fn docperm_meta() -> DoctypeMeta {
         .sort("modified", "desc")
         .allow_delete()
         .hidden()
+        .field(FieldMeta::tab_break("tab_target").label("Target"))
+        .field(FieldMeta::section_break("section_target").label("Target"))
         .field(
             FieldMeta::link("doc_type", "DocType")
                 .label("Document Type")
@@ -36,6 +38,8 @@ pub fn docperm_meta() -> DoctypeMeta {
                 .label("Permission Level")
                 .default_value("0"),
         )
+        .field(FieldMeta::tab_break("tab_rights").label("Rights"))
+        .field(FieldMeta::section_break("section_document_rights").label("Document Rights"))
         .field(FieldMeta::check("read").label("Read").default_value("0"))
         .field(FieldMeta::check("write").label("Write").default_value("0"))
         .field(
@@ -48,6 +52,7 @@ pub fn docperm_meta() -> DoctypeMeta {
                 .label("Delete")
                 .default_value("0"),
         )
+        .field(FieldMeta::section_break("section_lifecycle").label("Lifecycle"))
         .field(
             FieldMeta::check("submit")
                 .label("Submit")
@@ -59,6 +64,7 @@ pub fn docperm_meta() -> DoctypeMeta {
                 .default_value("0"),
         )
         .field(FieldMeta::check("amend").label("Amend").default_value("0"))
+        .field(FieldMeta::section_break("section_sharing").label("Sharing and Reporting"))
         .field(FieldMeta::check("print").label("Print").default_value("0"))
         .field(FieldMeta::check("email").label("Email").default_value("0"))
         .field(FieldMeta::check("share").label("Share").default_value("0"))
@@ -77,6 +83,8 @@ pub fn docperm_meta() -> DoctypeMeta {
                 .label("Export")
                 .default_value("0"),
         )
+        .field(FieldMeta::tab_break("tab_advanced").label("Advanced"))
+        .field(FieldMeta::section_break("section_overrides").label("Overrides"))
         .field(
             FieldMeta::check("if_owner")
                 .label("If Owner")

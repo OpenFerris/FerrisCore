@@ -47,6 +47,7 @@ pub fn doc_type_meta() -> DoctypeMeta {
         .sort("modified", "desc")
         .title_field("module")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(FieldMeta::data("module").label("Module").in_list_view())
         .field(FieldMeta::small_text("description").label("Description"))
         .field(FieldMeta::check("is_single").label("Is Single"))
@@ -73,6 +74,7 @@ pub fn doc_field_meta() -> DoctypeMeta {
     DoctypeMeta::new(DOCFIELD, BUILD_MODULE)
         .child_table()
         .description("One field of a DocType.")
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(FieldMeta::link("parent", DOCTYPE).label("Document Type"))
         .field(
             FieldMeta::data("fieldname")

@@ -24,6 +24,7 @@ pub fn activity_log_meta() -> DoctypeMeta {
         .description("The audit trail of user operations.")
         .sort("creation", "desc")
         .read_only()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(FieldMeta::link("user", "User").label("User").in_list_view())
         .field(FieldMeta::data("subject").label("Subject").in_list_view())
         .field(

@@ -14,6 +14,7 @@ pub fn module_def_meta() -> DoctypeMeta {
         .title_field("module_name")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("module_name")
                 .label("Module Name")

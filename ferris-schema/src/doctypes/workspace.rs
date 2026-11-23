@@ -61,6 +61,8 @@ pub fn workspace_meta() -> DoctypeMeta {
 /// Only the layout-only breaks are missing; see [`workspace_meta`].
 fn workspace_fields() -> Vec<FieldMeta> {
     vec![
+        FieldMeta::tab_break("tab_workspace").label("Workspace"),
+        FieldMeta::section_break("section_identity").label("Identity"),
         // Identity and destination.
         FieldMeta::data("label")
             .label("Name")
@@ -85,6 +87,8 @@ fn workspace_fields() -> Vec<FieldMeta> {
                  entry and sidebar it appears under.",
             ),
         // Workspace vs. a plain link tile.
+        FieldMeta::tab_break("tab_content").label("Content"),
+        FieldMeta::section_break("section_links").label("Links"),
         FieldMeta::select("type", "Workspace\nLink\nURL")
             .label("Type")
             .default_value("Workspace")
@@ -129,12 +133,16 @@ fn workspace_fields() -> Vec<FieldMeta> {
 /// (`Has Role`) list.
 fn workspace_child_fields() -> Vec<FieldMeta> {
     vec![
+        FieldMeta::tab_break("tab_items").label("Items"),
+        FieldMeta::section_break("section_items").label("Workspace Items"),
         FieldMeta::table("number_cards", "Workspace Number Card").label("Number Cards"),
         FieldMeta::table("charts", "Workspace Chart").label("Charts"),
         FieldMeta::table("shortcuts", "Workspace Shortcut").label("Shortcuts"),
         FieldMeta::table("links", "Workspace Link").label("Links"),
         FieldMeta::table("quick_lists", "Workspace Quick List").label("Quick Lists"),
         FieldMeta::table("custom_blocks", "Workspace Custom Block").label("Custom Blocks"),
+        FieldMeta::tab_break("tab_permissions").label("Permissions"),
+        FieldMeta::section_break("section_roles").label("Roles"),
         FieldMeta::table("roles", "Has Role").label("Roles"),
     ]
 }
@@ -148,6 +156,7 @@ pub fn workspace_link_meta() -> DoctypeMeta {
     DoctypeMeta::new("Workspace Link", BUILD_MODULE)
         .description("One link or card break in a workspace.")
         .child_table()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::select("type", "Link\nCard Break")
                 .label("Type")
@@ -207,6 +216,7 @@ pub fn workspace_shortcut_meta() -> DoctypeMeta {
     DoctypeMeta::new("Workspace Shortcut", BUILD_MODULE)
         .description("One shortcut tile in a workspace.")
         .child_table()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::select("type", "DocType\nReport\nPage\nDashboard\nURL")
                 .label("Type")

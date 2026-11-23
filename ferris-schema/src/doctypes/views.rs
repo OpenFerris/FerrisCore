@@ -15,6 +15,7 @@ pub fn report_meta() -> DoctypeMeta {
         .title_field("report_name")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("report_name")
                 .label("Report Name")
@@ -56,6 +57,7 @@ pub fn dashboard_meta() -> DoctypeMeta {
         .description("A dashboard: a route and a grid of widget instances.")
         .title_field("label")
         .sort("modified", "desc")
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("label")
                 .label("Label")
@@ -110,6 +112,7 @@ pub fn dashboard_widget_meta() -> DoctypeMeta {
     DoctypeMeta::new("Dashboard Widget", BUILD_MODULE)
         .description("One widget placement in a dashboard.")
         .child_table()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("widget_id")
                 .label("Widget Id")
@@ -166,6 +169,8 @@ pub fn widget_meta() -> DoctypeMeta {
         .description("One widget definition stored as data: metadata, params and source.")
         .title_field("label")
         .sort("modified", "desc")
+        .field(FieldMeta::tab_break("tab_definition").label("Definition"))
+        .field(FieldMeta::section_break("section_identity").label("Identity"))
         .field(
             FieldMeta::data("label")
                 .label("Label")
@@ -212,6 +217,8 @@ pub fn widget_meta() -> DoctypeMeta {
         .field(FieldMeta::data("icon").label("Icon"))
         .field(FieldMeta::data("category").label("Category"))
         .field(FieldMeta::data("preview").label("Preview"))
+        .field(FieldMeta::tab_break("tab_layout").label("Layout"))
+        .field(FieldMeta::section_break("section_grid").label("Grid"))
         .field(
             FieldMeta::json("style")
                 .label("Style")
@@ -233,6 +240,8 @@ pub fn widget_meta() -> DoctypeMeta {
                 .in_list_view()
                 .description("Disabled rows stay stored but are dropped from the feed; deleting a seeded row only makes the next migration recreate it."),
         )
+        .field(FieldMeta::tab_break("tab_source").label("Source"))
+        .field(FieldMeta::section_break("section_source").label("Source"))
         .field(
             FieldMeta::data("version")
                 .label("Version")
@@ -277,6 +286,7 @@ pub fn widget_param_meta() -> DoctypeMeta {
     DoctypeMeta::new("Widget Param", BUILD_MODULE)
         .description("One parameter of a widget definition.")
         .child_table()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("param_name")
                 .label("Parameter")
@@ -327,10 +337,8 @@ pub fn widget_param_meta() -> DoctypeMeta {
 pub fn kanban_board_meta() -> DoctypeMeta {
     DoctypeMeta::new("Kanban Board", BUILD_MODULE)
         .description("A kanban board configuration for one DocType.")
-        .title_field("name")
         .sort("modified", "desc")
         .allow_delete()
-        .field(FieldMeta::data("name").label("Name").in_list_view())
         .field(
             FieldMeta::link("doc_type", "DocType")
                 .label("Document Type")
@@ -345,10 +353,8 @@ pub fn kanban_board_meta() -> DoctypeMeta {
 pub fn calendar_view_meta() -> DoctypeMeta {
     DoctypeMeta::new("Calendar View", BUILD_MODULE)
         .description("A calendar view configuration for one DocType.")
-        .title_field("name")
         .sort("modified", "desc")
         .allow_delete()
-        .field(FieldMeta::data("name").label("Name").in_list_view())
         .field(
             FieldMeta::link("doc_type", "DocType")
                 .label("Document Type")
@@ -367,7 +373,6 @@ pub fn list_filter_meta() -> DoctypeMeta {
         .title_field("label")
         .sort("modified", "desc")
         .allow_delete()
-        .field(FieldMeta::data("name").label("Name"))
         .field(FieldMeta::link("dt", "DocType").label("Document Type"))
         .field(
             FieldMeta::data("fieldname")
@@ -387,6 +392,7 @@ pub fn page_meta() -> DoctypeMeta {
         .title_field("title")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("page_name")
                 .label("Page Name")

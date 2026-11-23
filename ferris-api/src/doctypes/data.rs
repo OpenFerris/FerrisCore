@@ -17,6 +17,7 @@ pub fn data_import_meta() -> DoctypeMeta {
         .title_field("reference_doctype")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("reference_doctype", "DocType")
                 .label("Document Type")
@@ -57,6 +58,7 @@ pub fn data_export_meta() -> DoctypeMeta {
         .title_field("reference_doctype")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("reference_doctype", "DocType")
                 .label("Document Type")
@@ -89,6 +91,7 @@ pub fn document_naming_rule_meta() -> DoctypeMeta {
         .title_field("document_type")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("document_type", "DocType")
                 .label("Document Type")
@@ -176,6 +179,7 @@ pub fn data_import_log_meta() -> DoctypeMeta {
         .description("The outcome of one row of a Data Import run.")
         .sort("creation", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("data_import", "Data Import")
                 .label("Data Import")
@@ -209,6 +213,7 @@ pub fn prepared_report_meta() -> DoctypeMeta {
         .title_field("report")
         .sort("creation", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("report", "Report")
                 .label("Report")

@@ -12,6 +12,7 @@ pub fn user_invitation_meta() -> DoctypeMeta {
         .title_field("email")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("email")
                 .label("Email")

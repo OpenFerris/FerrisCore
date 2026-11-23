@@ -19,6 +19,7 @@ pub fn doctype_action_meta() -> DoctypeMeta {
         .description("A document action declared on a DocType.")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("document_type", "DocType")
                 .label("Document Type")
@@ -51,6 +52,7 @@ pub fn doctype_link_meta() -> DoctypeMeta {
         .description("A document link declared on a DocType.")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("document_type", "DocType")
                 .label("Document Type")
@@ -120,6 +122,7 @@ pub fn form_tour_meta() -> DoctypeMeta {
         .title_field("title")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("title")
                 .label("Title")
@@ -154,6 +157,7 @@ pub fn form_tour_step_meta() -> DoctypeMeta {
         .description("One step of a Form Tour.")
         .child_table()
         .sort("idx", "asc")
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("parent", "Form Tour")
                 .label("Form Tour")

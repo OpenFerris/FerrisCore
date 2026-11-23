@@ -24,6 +24,7 @@ pub fn deleted_document_meta() -> DoctypeMeta {
         .description("A cancelled document kept for audit and restore.")
         .title_field("docname")
         .sort("deleted_at", "desc")
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(FieldMeta::data("doctype").label("DocType").in_list_view())
         .field(
             FieldMeta::data("docname")

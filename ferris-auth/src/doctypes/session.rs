@@ -20,6 +20,7 @@ pub fn session_meta() -> DoctypeMeta {
         .sort("created_at", "desc")
         .allow_delete()
         .hidden()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("user_id")
                 .label("User")
@@ -49,6 +50,7 @@ pub fn session_meta() -> DoctypeMeta {
                 .label("CSRF Token")
                 .permlevel(1)
                 .hidden()
+                .read_only()
                 .required(),
         )
         // Listing and capping a user's sessions filters on this field.

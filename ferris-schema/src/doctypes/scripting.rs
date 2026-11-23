@@ -34,10 +34,16 @@ pub fn client_script_meta() -> DoctypeMeta {
 pub fn server_script_meta() -> DoctypeMeta {
     DoctypeMeta::new("Server Script", BUILD_MODULE)
         .description("A script the server runs on a document event or API call.")
-        .title_field("name")
+        .title_field("script_name")
         .sort("modified", "desc")
         .allow_delete()
-        .field(FieldMeta::data("name").label("Name").in_list_view())
+        .field(FieldMeta::section_break("section_details").label("Details"))
+        .field(
+            FieldMeta::data("script_name")
+                .label("Script Name")
+                .required()
+                .in_list_view(),
+        )
         .field(
             FieldMeta::select("script_type", "DocType Event\nAPI")
                 .label("Script Type")

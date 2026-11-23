@@ -20,6 +20,7 @@ pub fn todo_meta() -> DoctypeMeta {
         .title_field("title")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("title")
                 .label("Title")
@@ -86,6 +87,7 @@ pub fn bulk_update_meta() -> DoctypeMeta {
         .title_field("document_type")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("document_type", "DocType")
                 .label("Document Type")
@@ -117,6 +119,7 @@ pub fn notification_log_meta() -> DoctypeMeta {
         .title_field("subject")
         .sort("creation", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::data("subject")
                 .label("Subject")

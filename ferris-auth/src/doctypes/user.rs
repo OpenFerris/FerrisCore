@@ -12,6 +12,8 @@ pub fn user_meta() -> DoctypeMeta {
         .title_field("full_name")
         .sort("full_name", "asc")
         .allow_delete()
+        .field(FieldMeta::tab_break("tab_profile").label("Profile"))
+        .field(FieldMeta::section_break("section_identity").label("Identity"))
         .field(
             FieldMeta::data("email")
                 .label("Email")
@@ -45,6 +47,10 @@ pub fn user_meta() -> DoctypeMeta {
         // masked on read by the document engine (`ferris_core::password`); a
         // `permlevel` of 1 makes the field administrator-only, so it is stripped
         // from any read a non-administrator performs.
+        .field(FieldMeta::data("language").label("Language"))
+        .field(FieldMeta::data("timezone").label("Timezone"))
+        .field(FieldMeta::tab_break("tab_security").label("Security"))
+        .field(FieldMeta::section_break("section_credentials").label("Credentials"))
         .field(
             FieldMeta::password("password")
                 .label("Password")
@@ -95,6 +101,8 @@ pub fn user_meta() -> DoctypeMeta {
                 .label("MFA Enabled")
                 .default_value("0"),
         )
+        .field(FieldMeta::tab_break("tab_activity").label("Activity"))
+        .field(FieldMeta::section_break("section_login_audit").label("Login Audit"))
         .field(
             FieldMeta::datetime("last_login")
                 .label("Last Login")
@@ -118,8 +126,6 @@ pub fn user_meta() -> DoctypeMeta {
                 .permlevel(1)
                 .hidden(),
         )
-        .field(FieldMeta::data("language").label("Language"))
-        .field(FieldMeta::data("timezone").label("Timezone"))
         // Login resolves by email or username on every unauthenticated
         // request; the JSON expression indexes keep those `=` filters pushed
         // into SQL instead of scanning the small-but-hot user table.

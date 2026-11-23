@@ -29,12 +29,16 @@ pub fn notification_meta() -> DoctypeMeta {
         // needed for a feed nobody addresses by name.
         naming_series: String::new(),
         fields: vec![
+            FieldMeta::section_break("section_details").label("Details"),
             required(with_label(field("user", "Data"), "User")),
-            with_default(field("notification_type", "Data"), "General"),
+            with_label(
+                with_default(field("notification_type", "Data"), "General"),
+                "Notification Type",
+            ),
             required(with_label(field("title", "Data"), "Title")),
             with_label(field("description", "Text"), "Description"),
             with_label(field("route", "Data"), "Route"),
-            with_default(field("is_read", "Check"), "0"),
+            with_label(with_default(field("is_read", "Check"), "0"), "Read"),
         ],
         // A feed, not a document: keep it out of the workspace, search and
         // exports. It is reached only through the panel's own endpoints.
@@ -62,6 +66,7 @@ pub fn event_meta() -> DoctypeMeta {
         description: Some("A dated entry on the desk events feed.".to_string()),
         naming_series: String::new(),
         fields: vec![
+            FieldMeta::section_break("section_details").label("Details"),
             required(with_label(field("title", "Data"), "Title")),
             required(with_label(field("starts_on", "Datetime"), "Starts On")),
             with_label(field("ends_on", "Datetime"), "Ends On"),
@@ -78,6 +83,9 @@ pub fn event_meta() -> DoctypeMeta {
         // edit path, and a grant nobody uses is a grant nobody audits.
         permissions: vec![all_users(true)],
         in_calendar: true,
+        date_field: Some("starts_on".to_string()),
+        calendar_end_field: Some("ends_on".to_string()),
+        calendar_title_field: Some("title".to_string()),
         sort_field: Some("starts_on".to_string()),
         sort_order: Some("asc".to_string()),
         ..Default::default()
@@ -166,7 +174,6 @@ pub fn desired_state_meta() -> DoctypeMeta {
             "The desired configuration of one externally managed entity, as published \
              by the control plane and pulled by edge agents.",
         )
-        .title_field("name")
         .sort("modified", "desc")
         .allow_delete()
         .hidden()

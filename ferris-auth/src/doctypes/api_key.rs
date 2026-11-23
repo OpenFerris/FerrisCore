@@ -21,6 +21,7 @@ pub fn api_key_meta() -> DoctypeMeta {
         .sort("created_at", "desc")
         .allow_delete()
         .hidden()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("user", "User")
                 .label("User")
@@ -38,6 +39,7 @@ pub fn api_key_meta() -> DoctypeMeta {
                 .label("Secret Hash")
                 .permlevel(1)
                 .hidden()
+                .read_only()
                 .required(),
         )
         .field(

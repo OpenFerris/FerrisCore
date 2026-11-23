@@ -49,6 +49,8 @@ pub fn build_workspace() -> WorkspaceSpec {
                 Item::doctype("DocType Link"),
                 Item::doctype("Permission Type"),
                 Item::doctype("Custom DocPerm"),
+                Item::doctype("Custom HTML Block"),
+                Item::doctype("DocType Layout"),
             ],
         )
         .group(
@@ -63,6 +65,8 @@ pub fn build_workspace() -> WorkspaceSpec {
             vec![
                 Item::doctype("Report"),
                 Item::doctype("Dashboard"),
+                Item::doctype("Dashboard Chart"),
+                Item::doctype("Number Card"),
                 Item::doctype("Widget"),
                 Item::doctype("Kanban Board"),
                 Item::doctype("Calendar View"),
@@ -85,13 +89,18 @@ pub fn build_workspace() -> WorkspaceSpec {
             "Modules",
             // `DocField` is a child table: it has no standalone list, so it is
             // not a sidebar destination (its rows live inside a `DocType`).
-            vec![Item::doctype("Module Def"), Item::doctype("DocType")],
+            vec![
+                Item::doctype("Module Def"),
+                Item::doctype("Module Onboarding"),
+                Item::doctype("DocType"),
+            ],
         )
         .group(
             "Settings",
             vec![
                 Item::doctype("Global Search Settings"),
                 Item::doctype("Notification Settings"),
+                Item::doctype("Domain"),
             ],
         )
 }
@@ -159,20 +168,26 @@ mod tests {
             "Client Script",
             "Custom DocPerm",
             "Custom Field",
+            "Custom HTML Block",
             "Custom Translation",
             "Customize Form",
             "Dashboard",
+            "Dashboard Chart",
             "DocType",
             "DocType Action",
+            "DocType Layout",
             "DocType Link",
+            "Domain",
             "Event",
             "Global Search Settings",
             "Kanban Board",
             "List Filter",
             "Module Def",
+            "Module Onboarding",
             "Navbar Settings",
             "Notification Log",
             "Notification Settings",
+            "Number Card",
             "Page",
             "Permission Type",
             "Property Setter",

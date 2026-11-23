@@ -23,6 +23,7 @@
 mod all;
 mod consts;
 mod customization;
+mod domain;
 mod form_meta;
 mod geo;
 mod modules;
@@ -31,6 +32,7 @@ mod scripting;
 mod system;
 mod views;
 mod workspace;
+mod workspace_assets;
 
 pub use all::{doctype_metas, register_doctypes};
 pub use consts::{BUILD_MODULE, GEO_MODULE};
@@ -38,6 +40,7 @@ pub use customization::{
     custom_doc_perm_meta, custom_field_meta, custom_translation_meta, customize_form_meta,
     navbar_settings_meta, property_setter_meta,
 };
+pub use domain::domain_meta;
 pub use form_meta::{
     doctype_action_meta, doctype_link_meta, form_tour_meta, form_tour_step_meta,
     permission_type_meta,
@@ -53,6 +56,10 @@ pub use views::{
 pub use workspace::{
     workspace_chart_meta, workspace_custom_block_meta, workspace_link_meta, workspace_meta,
     workspace_number_card_meta, workspace_quick_list_meta, workspace_shortcut_meta,
+};
+pub use workspace_assets::{
+    custom_html_block_meta, dashboard_chart_meta, doctype_layout_meta, module_onboarding_meta,
+    number_card_meta,
 };
 
 #[cfg(test)]

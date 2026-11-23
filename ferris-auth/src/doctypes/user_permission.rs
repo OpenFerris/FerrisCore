@@ -19,6 +19,7 @@ pub fn user_permission_meta() -> DoctypeMeta {
         .title_field("for_value")
         .sort("modified", "desc")
         .allow_delete()
+        .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
             FieldMeta::link("user", "User")
                 .label("User")
