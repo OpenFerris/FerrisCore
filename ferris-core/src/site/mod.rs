@@ -21,7 +21,7 @@ mod tests;
 
 pub use config::SiteConfig;
 pub use manager::{
-    APPS_FILE, ASSETS_DIR, COMMON_CONFIG_FILE, CONFIG_FILE, SITE_CONFIG_FILE, SiteManager,
-    is_valid_site_name,
+    APPS_FILE, ASSETS_DIR, COMMON_CONFIG_FILE, CONFIG_FILE, LOCALES_DIR, SITE_CONFIG_FILE,
+    SiteManager, is_valid_site_name,
 };
 pub use manifest::{AppManifest, PLUGIN_MANIFEST, TEMPLATE_WORLD};

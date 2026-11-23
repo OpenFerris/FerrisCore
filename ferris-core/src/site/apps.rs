@@ -14,7 +14,7 @@ use crate::{ConfigError, Error, Result, ValidationError};
 
 use super::config::SiteConfig;
 use super::fsx::{copy_tree, create_private_dir, write_private, write_private_atomic};
-use super::manager::{APPS_FILE, ASSETS_DIR, CONFIG_FILE, SiteManager};
+use super::manager::{APPS_FILE, ASSETS_DIR, CONFIG_FILE, LOCALES_DIR, SiteManager};
 use super::manifest::{AppManifest, PLUGIN_MANIFEST, TEMPLATE_WORLD};
 
 impl SiteManager {
@@ -91,6 +91,19 @@ impl SiteManager {
             std::fs::remove_file(&installed_docperm)?;
         }
 
+        let locales = dest.join(LOCALES_DIR);
+        let package_locales = package.join(LOCALES_DIR);
+        if package_locales.is_dir() {
+            if locales.is_dir() {
+                std::fs::remove_dir_all(&locales)?;
+            }
+            copy_tree(&package_locales, &locales)?;
+        } else if locales.is_dir() {
+            // A re-install without catalogues must not keep the old ones: the
+            // locale policy and the messages would disagree.
+            std::fs::remove_dir_all(&locales)?;
+        }
+
         let assets = dest.join(ASSETS_DIR);
         let package_assets = package.join(ASSETS_DIR);
         if package_assets.is_dir() {
@@ -152,6 +165,19 @@ impl SiteManager {
         write_private(&config_path, &text)?;
 
         copy_component(&manifest.wasm, &instance, app)?;
+
+        // The app's catalogues travel with it. A missing directory clears the
+        // previous ones, for the same reason the catalogue install does.
+        let catalogue_locales = self.global_app_dir(app)?.join(LOCALES_DIR);
+        let instance_locales = instance.join(LOCALES_DIR);
+        if catalogue_locales.is_dir() {
+            if instance_locales.is_dir() {
+                std::fs::remove_dir_all(&instance_locales)?;
+            }
+            copy_tree(&catalogue_locales, &instance_locales)?;
+        } else if instance_locales.is_dir() {
+            std::fs::remove_dir_all(&instance_locales)?;
+        }
 
         let mut apps = self.read_apps(site)?;
         if !apps.iter().any(|name| name == app) {
