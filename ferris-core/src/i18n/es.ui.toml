@@ -1,0 +1,86 @@
+# Fragmento en español: es. Las claves son planas y con prefijo; `en` y `es`
+# deben declarar exactamente las mismas.
+
+# Paleta de comandos y selectores basados en comandos.
+"ui.command.search" = "Buscar"
+"ui.command.no_results" = "Sin resultados."
+"ui.command.select_country" = "Seleccionar país"
+"ui.command.country_search" = "Buscar país…"
+"ui.command.country_search_label" = "Buscar país"
+"ui.command.all_countries" = "Todos los países"
+
+# Controles de formulario con nombre accesible por defecto.
+"ui.checkbox.label" = "Casilla de verificación"
+"ui.switch.label" = "Interruptor"
+"ui.select.group_label" = "Opciones de selección"
+"ui.footer.social_link" = "Enlace a red social"
+"ui.input_prompt.placeholder" = "Escribe un mensaje…"
+"ui.multi_select.selected_one" = "1 seleccionado"
+"ui.multi_select.selected_many" = "{count} seleccionados"
+"ui.form.required" = "Rellena todos los campos obligatorios."
+
+# Interfaz: indicadores, cambio de tema, navegación y capas.
+"ui.spinner.loading" = "Cargando"
+"ui.theme_toggle.label" = "Cambiar entre tema claro y oscuro"
+"ui.header.navigation" = "Principal"
+"ui.sidenav.toggle" = "Alternar barra lateral"
+"ui.dialog.close" = "Cerrar"
+"ui.dialog.close_hidden" = "Cerrar diálogo"
+"ui.sheet.close" = "Cerrar"
+"ui.sheet.close_hidden" = "Cerrar panel"
+"ui.carousel.previous" = "Diapositiva anterior"
+"ui.carousel.next" = "Diapositiva siguiente"
+"ui.breadcrumb.show_more" = "Mostrar más"
+"ui.breadcrumb.more" = "Más"
+"ui.breadcrumb.open_menu" = "Abrir menú"
+"ui.pagination.previous" = "anterior"
+"ui.pagination.next" = "siguiente"
+"ui.pagination.go_to" = "Ir a la página {direction}"
+
+# Tabla de datos y gráficas.
+"ui.data_grid.label" = "Tabla de datos"
+"ui.data_grid.body" = "Cuerpo de la tabla"
+"ui.data_grid.resize_column" = "Redimensionar columna"
+"ui.data_grid.select_all" = "Seleccionar todo"
+"ui.data_grid.sort_asc" = "Ordenar ascendente"
+"ui.data_grid.sort_desc" = "Ordenar descendente"
+"ui.data_grid.remove_sort" = "Quitar ordenación"
+"ui.data_grid.pin_left" = "Fijar a la izquierda"
+"ui.data_grid.unpin_left" = "Dejar de fijar a la izquierda"
+"ui.data_grid.hide_column" = "Ocultar columna"
+"ui.chart.area_label" = "Gráfica de área"
+"ui.chart.empty" = "Sin datos"
+
+# Tour guiado.
+"ui.tour.label" = "Tour guiado"
+"ui.tour.step" = "Paso {current} de {total}"
+"ui.tour.previous" = "Anterior"
+"ui.tour.next" = "Siguiente"
+"ui.tour.done" = "Listo"
+
+# Escáner de cámara: etiquetas y errores de plataforma.
+"ui.scanner.label" = "Escanear"
+"ui.scanner.description" = "Apunta la cámara al código."
+"ui.scanner.title" = "Escanear código"
+"ui.scanner.error.view" = "El visor de la cámara no está montado"
+"ui.scanner.error.window" = "No hay ventana del navegador disponible"
+"ui.scanner.error.detector_missing" = "El navegador no expone BarcodeDetector"
+"ui.scanner.error.unsupported" = "Este navegador no permite leer códigos con BarcodeDetector"
+"ui.scanner.error.detector_not_function" = "BarcodeDetector no es una función"
+"ui.scanner.error.configure" = "No se pudo configurar BarcodeDetector"
+"ui.scanner.error.formats" = "BarcodeDetector rechazó los formatos"
+"ui.scanner.error.no_object" = "BarcodeDetector no devolvió un objeto"
+"ui.scanner.error.no_detect" = "BarcodeDetector no tiene detect()"
+"ui.scanner.error.detect_not_function" = "BarcodeDetector.detect no es una función"
+"ui.scanner.error.detect_failed" = "BarcodeDetector.detect falló"
+"ui.scanner.error.detect_not_promise" = "BarcodeDetector.detect no devolvió una promesa"
+"ui.scanner.error.detect_rejected" = "BarcodeDetector.detect rechazó la lectura"
+"ui.scanner.error.no_list" = "BarcodeDetector no devolvió una lista"
+"ui.scanner.error.get_user_media_missing" = "El navegador no expone getUserMedia"
+"ui.scanner.error.camera_open" = "No se pudo abrir la cámara"
+"ui.scanner.error.camera_denied" = "El usuario o el navegador denegó la cámara"
+"ui.scanner.error.no_stream" = "getUserMedia no devolvió un MediaStream"
+
+# Campo de teléfono.
+"ui.input_phone.label" = "Número de teléfono"
+"ui.input_phone.clear" = "Borrar número de teléfono"

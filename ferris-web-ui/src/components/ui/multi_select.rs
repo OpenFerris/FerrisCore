@@ -34,6 +34,7 @@ pub enum MultiSelectPosition {
 #[component]
 pub fn MultiSelectValue(#[prop(optional, into)] placeholder: String) -> impl IntoView {
     let multi_select_ctx = expect_context::<MultiSelectContext>();
+    let i18n = crate::i18n::use_i18n();
 
     view! {
         <span data-name="MultiSelectValue" class="text-sm text-muted-foreground truncate">
@@ -43,7 +44,15 @@ pub fn MultiSelectValue(#[prop(optional, into)] placeholder: String) -> impl Int
                     placeholder.clone()
                 } else {
                     let count = values.len();
-                    if count == 1 { "1 selected".to_string() } else { format!("{} selected", count) }
+                    if count == 1 {
+                        i18n.t("ui.multi_select.selected_one")
+                    } else {
+                        let count = count.to_string();
+                        i18n.t_with(
+                            "ui.multi_select.selected_many",
+                            &[("count", count.as_str())],
+                        )
+                    }
                 }
             }}
         </span>

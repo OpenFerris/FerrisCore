@@ -113,7 +113,7 @@ pub fn NavMenu(children: Children, #[prop(into, optional)] class: String) -> imp
         <div
             data-name="NavMenu"
             class=merged_class
-            aria-label="Main"
+            aria-label=crate::i18n::t("ui.header.navigation")
             data-orientation="horizontal"
             dir="ltr"
             data-viewport="false"

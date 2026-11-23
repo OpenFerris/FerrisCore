@@ -1,0 +1,39 @@
+# English source catalog. `es.toml` must declare exactly the same keys; the
+# `tests::catalogues_share_keys` test enforces it.
+#
+# Keys are flattened as `<table>.<key>`; `Catalog::from_toml` accepts this nested
+# form and the inline `"login.title" = "..."` form equally.
+
+[login]
+title = "Ferris Desk"
+subtitle = "Sign in to continue"
+email = "Email or username"
+password = "Password"
+submit = "Sign in"
+mfa_title = "Two-factor authentication"
+mfa_hint = "Enter the code from your authenticator app"
+mfa_code = "Verification code"
+mfa_verify = "Verify"
+error.empty_credentials = "Enter your email and password"
+error.empty_code = "Enter the verification code"
+oauth_continue = "or continue with"
+
+[common]
+cancel = "Cancel"
+save = "Save"
+close = "Close"
+loading = "Loading…"
+error = "Something went wrong"
+
+[nav]
+desk = "Desk"
+login = "Sign in"
+logout = "Sign out"
+workspaces = "Workspaces"
+settings = "Settings"
+
+[error]
+not_found_title = "Page not found"
+not_found_body = "The page you are looking for does not exist."
+unauthorized_title = "Unauthorized"
+unauthorized_body = "You do not have permission to view this page."

@@ -1,0 +1,36 @@
+# Catálogo en español. Debe declarar exactamente las mismas claves que
+# `en.toml`; lo comprueba el test `tests::catalogues_share_keys`.
+
+[login]
+title = "Ferris Desk"
+subtitle = "Inicia sesión para continuar"
+email = "Correo o usuario"
+password = "Contraseña"
+submit = "Entrar"
+mfa_title = "Verificación en dos pasos"
+mfa_hint = "Introduce el código de tu aplicación de autenticación"
+mfa_code = "Código de verificación"
+mfa_verify = "Verificar"
+error.empty_credentials = "Introduce tu correo y contraseña"
+error.empty_code = "Introduce el código de verificación"
+oauth_continue = "o continúa con"
+
+[common]
+cancel = "Cancelar"
+save = "Guardar"
+close = "Cerrar"
+loading = "Cargando…"
+error = "Algo salió mal"
+
+[nav]
+desk = "Escritorio"
+login = "Iniciar sesión"
+logout = "Cerrar sesión"
+workspaces = "Espacios de trabajo"
+settings = "Ajustes"
+
+[error]
+not_found_title = "Página no encontrada"
+not_found_body = "La página que buscas no existe."
+unauthorized_title = "No autorizado"
+unauthorized_body = "No tienes permiso para ver esta página."

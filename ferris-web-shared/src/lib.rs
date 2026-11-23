@@ -11,6 +11,7 @@
 pub mod country;
 pub mod date;
 pub mod html;
+pub mod i18n;
 pub mod markdown;
 pub mod meta;
 pub mod meta_types;

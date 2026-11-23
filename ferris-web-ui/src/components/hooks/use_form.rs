@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use ferris_web_shared::i18n::DeskI18n;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -27,6 +28,10 @@ pub struct Form<T> {
     pub values_signal: RwSignal<HashMap<String, String>>,
     pub errors_signal: RwSignal<HashMap<String, Option<String>>>,
     pub touched_signal: RwSignal<HashSet<String>>,
+    /// Catalogue captured by [`use_form`]. Validation runs from event handlers,
+    /// where no reactive owner is active, so the messages must be resolved
+    /// against a catalogue read during setup.
+    i18n: StoredValue<DeskI18n>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -44,6 +49,7 @@ impl<T> Default for Form<T> {
             values_signal: RwSignal::new(Default::default()),
             errors_signal: RwSignal::new(Default::default()),
             touched_signal: RwSignal::new(Default::default()),
+            i18n: StoredValue::new(DeskI18n::default()),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -150,7 +156,7 @@ where
     pub fn validate_and_get(&self) -> Result<T, String> {
         let data = self
             .map_to_struct(&self.values_signal.get())
-            .ok_or_else(|| "Please fill in all required fields.".to_string())?;
+            .ok_or_else(|| self.i18n.with_value(|i18n| i18n.t("ui.form.required")))?;
 
         data.validate().map_err(|errors| {
             errors
@@ -171,7 +177,9 @@ pub fn use_form<T>() -> Form<T>
 where
     T: FormData,
 {
-    Form::default()
+    let form = Form::default();
+    form.i18n.set_value(crate::i18n::use_i18n().value());
+    form
 }
 
 #[derive(Clone, Copy)]

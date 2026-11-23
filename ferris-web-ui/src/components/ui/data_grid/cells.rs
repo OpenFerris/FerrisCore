@@ -241,7 +241,7 @@ pub fn TableSeparator(
             data-name="TableSeparator"
             class=merged_class
             aria-orientation="vertical"
-            aria-label="Redimensionar columna"
+            aria-label=crate::i18n::t("ui.data_grid.resize_column")
             aria-valuenow=valuenow.to_string()
             aria-valuemin=valuemin.to_string()
             aria-valuemax=valuemax.to_string()

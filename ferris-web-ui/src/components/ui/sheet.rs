@@ -81,7 +81,13 @@ pub fn SheetClose(
     let ctx = expect_context::<SheetContext>();
 
     view! {
-        <Button class=class attr:data-sheet-close=ctx.target_id attr:aria-label="Close sheet" variant=variant size=size>
+        <Button
+            class=class
+            attr:data-sheet-close=ctx.target_id
+            attr:aria-label=crate::i18n::t("ui.sheet.close")
+            variant=variant
+            size=size
+        >
             {children()}
         </Button>
     }
@@ -136,9 +142,9 @@ pub fn SheetContent(
                     if show_close_button { "" } else { "hidden" },
                 )
                 data-sheet-close=ctx.target_id.clone()
-                aria-label="Close sheet"
+                aria-label=crate::i18n::t("ui.sheet.close")
             >
-                <span class="hidden">"Close Sheet"</span>
+                <span class="hidden">{crate::i18n::t("ui.sheet.close_hidden")}</span>
                 <X />
             </button>
 

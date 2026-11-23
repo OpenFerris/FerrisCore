@@ -90,7 +90,7 @@ pub fn InputPhone(
                     // halves of the control stay the same height on a phone.
                     class="gap-1 px-3 w-auto rounded-r-none border-r-0 max-md:h-10"
                     attr:disabled=disabled
-                    attr:aria-label="Seleccionar país"
+                    attr:aria-label=crate::i18n::t("ui.command.select_country")
                 >
                     <span class="text-base">{move || selected_country.get().flag_emoji()}</span>
                     <span class="text-xs text-muted-foreground">
@@ -103,10 +103,13 @@ pub fn InputPhone(
                     <Command>
                         <div class="flex gap-2 items-center px-2 border-b">
                             <Search class="size-4 text-muted-foreground shrink-0" />
-                            <CommandInput placeholder="Buscar país…" aria_label="Buscar país" />
+                            <CommandInput
+                                placeholder=crate::i18n::t("ui.command.country_search")
+                                aria_label=crate::i18n::t("ui.command.country_search_label")
+                            />
                         </div>
                         <CommandList class="min-h-0 max-h-[280px]">
-                            <CommandEmpty>"Sin resultados."</CommandEmpty>
+                            <CommandEmpty>{crate::i18n::t("ui.command.no_results")}</CommandEmpty>
 
                             // Common countries
                             <CommandGroup>
@@ -120,7 +123,7 @@ pub fn InputPhone(
 
                             // Separator + rest of countries
                             <CommandGroup>
-                                <CommandGroupLabel>"Todos los países"</CommandGroupLabel>
+                                <CommandGroupLabel>{crate::i18n::t("ui.command.all_countries")}</CommandGroupLabel>
                                 {Country::all()
                                     .iter()
                                     .filter(|c| !COMMON_COUNTRIES.contains(c))
@@ -143,7 +146,7 @@ pub fn InputPhone(
                     attr:inputmode="numeric"
                     attr:placeholder=move || PhoneFormat::for_country(selected_country.get()).placeholder()
                     attr:disabled=disabled
-                    attr:aria-label="Número de teléfono"
+                    attr:aria-label=crate::i18n::t("ui.input_phone.label")
                     attr:aria-invalid=move || invalid.get().unwrap_or(false)
                     prop:value=move || value.get().format(selected_country.get())
                     // The listener arrives as a prop: a component only gets DOM
@@ -167,7 +170,7 @@ pub fn InputPhone(
                     <button
                         type="button"
                         class="absolute end-2 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground max-md:end-1 max-md:flex max-md:size-9 max-md:items-center max-md:justify-center max-md:p-0"
-                        aria-label="Borrar número de teléfono"
+                        aria-label=crate::i18n::t("ui.input_phone.clear")
                         on:click=move |_| value.set(PhoneNumber::default())
                     >
                         <X class="size-4" />

@@ -13,7 +13,7 @@ pub use components::*;
 pub fn Switch(
     #[prop(optional, into)] id: String,
     #[prop(optional, default = false)] checked: bool,
-    #[prop(into, optional, default = "Toggle switch".to_string())] aria_label: String,
+    #[prop(into, optional, default = crate::i18n::t("ui.switch.label"))] aria_label: String,
     #[prop(into, optional)] class: String,
 ) -> impl IntoView {
     let is_checked = RwSignal::new(checked);

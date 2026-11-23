@@ -28,7 +28,7 @@ pub fn InputPromptTextarea(
     #[prop(into, optional)] class: String,
     #[prop(optional)] on_submit: Option<Callback<()>>,
 ) -> impl IntoView {
-    let placeholder = placeholder.unwrap_or_else(|| "Write a message...".to_string());
+    let placeholder = placeholder.unwrap_or_else(|| crate::i18n::t("ui.input_prompt.placeholder"));
     let merged_class = tw_merge!(
         "flex-1 resize-none rounded-none border-0 bg-transparent py-3 px-3 \
          field-sizing-content min-h-[52px] max-h-48 text-sm shadow-none \

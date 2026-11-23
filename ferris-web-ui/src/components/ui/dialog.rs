@@ -214,9 +214,9 @@ pub fn DialogContent(
                     if show_close_button { "" } else { "hidden" },
                 )
                 data-dialog-close=target_id_clone
-                aria-label="Cerrar"
+                aria-label=crate::i18n::t("ui.dialog.close")
             >
-                <span class="hidden">"Cerrar diálogo"</span>
+                <span class="hidden">{crate::i18n::t("ui.dialog.close_hidden")}</span>
                 <X />
             </button>
 
@@ -352,7 +352,7 @@ pub fn DialogClose(
         <Button
             class=class
             attr:data-dialog-close=ctx.target_id
-            attr:aria-label="Cerrar"
+            attr:aria-label=crate::i18n::t("ui.dialog.close")
             variant=variant
             size=size
         >

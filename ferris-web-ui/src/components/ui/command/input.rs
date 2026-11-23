@@ -5,7 +5,7 @@ pub fn CommandInput(
     #[prop(into, optional)] class: String,
     /// Accessible name for the search field. The palette is generic; the caller
     /// knows what it searches.
-    #[prop(into, optional, default = "Buscar".to_string())]
+    #[prop(into, optional, default = crate::i18n::t("ui.command.search"))]
     aria_label: String,
     /// Id of the listbox the input controls, when the palette declares one.
     #[prop(into, optional)]

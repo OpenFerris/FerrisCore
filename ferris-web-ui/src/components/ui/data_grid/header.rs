@@ -30,11 +30,11 @@ where
                 <DropdownMenuRadioGroup value=sort_signal>
                     <DropdownMenuRadioItem value=SortDirection::Asc>
                         <ArrowUpNarrowWide class="text-muted-foreground" />
-                        <span>"Sort asc"</span>
+                        <span>{crate::i18n::t("ui.data_grid.sort_asc")}</span>
                     </DropdownMenuRadioItem>
                     <DropdownMenuRadioItem value=SortDirection::Desc>
                         <ArrowDownWideNarrow class="text-muted-foreground" />
-                        <span>"Sort desc"</span>
+                        <span>{crate::i18n::t("ui.data_grid.sort_desc")}</span>
                     </DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
                 {move || {
@@ -44,7 +44,7 @@ where
                                 <DropdownMenuItem on:click=move |_| sort_signal.set(SortDirection::None)>
                                     <DropdownMenuAction>
                                         <CircleX class="text-muted-foreground" />
-                                        <span>"Remove sort"</span>
+                                        <span>{crate::i18n::t("ui.data_grid.remove_sort")}</span>
                                     </DropdownMenuAction>
                                 </DropdownMenuItem>
                             }
@@ -62,7 +62,7 @@ where
                             }>
                                 <DropdownMenuAction>
                                     <PanelLeftClose class="text-muted-foreground" />
-                                    <span>"Unpin from left"</span>
+                                    <span>{crate::i18n::t("ui.data_grid.unpin_left")}</span>
                                 </DropdownMenuAction>
                             </DropdownMenuItem>
                         }
@@ -77,7 +77,7 @@ where
                             }>
                                 <DropdownMenuAction>
                                     <PanelLeft class="text-muted-foreground" />
-                                    <span>"Pin to left"</span>
+                                    <span>{crate::i18n::t("ui.data_grid.pin_left")}</span>
                                 </DropdownMenuAction>
                             </DropdownMenuItem>
                         }
@@ -97,7 +97,7 @@ where
                                 }>
                                     <DropdownMenuAction>
                                         <EyeOff class="text-muted-foreground" />
-                                        <span>"Hide Column"</span>
+                                        <span>{crate::i18n::t("ui.data_grid.hide_column")}</span>
                                     </DropdownMenuAction>
                                 </DropdownMenuItem>
                             </DropdownMenuGroup>
@@ -231,7 +231,7 @@ where
                                 row_count > 0 && selected_count_signal.get() == row_count
                             })
                             on_checked_change=handle_select_all
-                            aria_label="Seleccionar todo"
+                            aria_label=crate::i18n::t("ui.data_grid.select_all")
                         />
                     </div>
                 </GridSelectHeaderCell>

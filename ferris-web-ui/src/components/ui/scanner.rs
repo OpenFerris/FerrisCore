@@ -38,10 +38,10 @@ pub fn Scanner(
     #[prop(default = false)]
     multiple: bool,
     /// Trigger label.
-    #[prop(default = "Escanear".to_string(), into)]
+    #[prop(default = crate::i18n::t("ui.scanner.label"), into)]
     label: String,
     /// Accessible description shown under the title.
-    #[prop(default = "Apunta la cámara al código.".to_string())]
+    #[prop(default = crate::i18n::t("ui.scanner.description"))]
     description: String,
 ) -> impl IntoView {
     // `on_scan`/`multiple` are only read by the client task; SSR still builds
@@ -57,25 +57,27 @@ pub fn Scanner(
     #[cfg(target_arch = "wasm32")]
     {
         let on_scan = on_scan;
+        let i18n = crate::i18n::use_i18n();
         Effect::new(move |_| {
             if !open.get() {
                 return;
             }
             error.set(None);
             let Some(video) = video_ref.get() else {
-                error.set(Some("El visor de la cámara no está montado".to_string()));
+                error.set(Some(i18n.t("ui.scanner.error.view")));
                 return;
             };
             let video_for_task = video.clone();
+            let i18n = i18n.clone();
             spawn_local(async move {
                 // The element is attached in the same render pass; one frame
                 // gives the browser time to create the media element.
                 sleep(50).await;
-                if let Err(message) = start_camera(&video_for_task).await {
+                if let Err(message) = start_camera(&video_for_task, &i18n).await {
                     error.set(Some(message));
                     return;
                 }
-                let detector = match detector() {
+                let detector = match detector(&i18n) {
                     Ok(detector) => detector,
                     Err(message) => {
                         error.set(Some(message));
@@ -87,7 +89,7 @@ pub fn Scanner(
                     if !open.get_untracked() {
                         break;
                     }
-                    match detect_once(&detector, &video_for_task).await {
+                    match detect_once(&detector, &video_for_task, &i18n).await {
                         Ok(Some(code)) => {
                             on_scan.run(code);
                             if !multiple {
@@ -142,7 +144,7 @@ pub fn Scanner(
         <Dialog>
             <DialogContent open=open class="max-w-lg">
                 <DialogHeader>
-                    <DialogTitle>"Escanear código"</DialogTitle>
+                    <DialogTitle>{crate::i18n::t("ui.scanner.title")}</DialogTitle>
                     <DialogDescription>{description}</DialogDescription>
                 </DialogHeader>
                 <div class="relative overflow-hidden rounded-lg border bg-muted">
@@ -166,21 +168,19 @@ pub fn Scanner(
 
 /// Resolve the platform decoder once per scan session.
 #[cfg(target_arch = "wasm32")]
-fn detector() -> Result<js_sys::Object, String> {
+fn detector(i18n: &crate::i18n::I18n) -> Result<js_sys::Object, String> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
 
-    let window = web_sys::window().ok_or_else(|| "No hay ventana del navegador".to_string())?;
+    let window = web_sys::window().ok_or_else(|| i18n.t("ui.scanner.error.window"))?;
     let ctor = js_sys::Reflect::get(&window, &JsValue::from_str("BarcodeDetector"))
-        .map_err(|_| "El navegador no expone BarcodeDetector".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.detector_missing"))?;
     if !ctor.is_function() {
-        return Err(
-            "Este navegador no soporta la lectura de códigos con BarcodeDetector".to_string(),
-        );
+        return Err(i18n.t("ui.scanner.error.unsupported"));
     }
     let ctor: js_sys::Function = ctor
         .dyn_into()
-        .map_err(|_| "BarcodeDetector no es una función".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.detector_not_function"))?;
 
     // Prefer the common formats; an unsupported name makes `BarcodeDetector`
     // reject the whole construction, so build the list defensively.
@@ -192,14 +192,14 @@ fn detector() -> Result<js_sys::Object, String> {
     }
     let init = js_sys::Object::new();
     js_sys::Reflect::set(&init, &JsValue::from_str("formats"), &formats)
-        .map_err(|_| "No se pudo configurar BarcodeDetector".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.configure"))?;
     let args = js_sys::Array::new();
     args.push(&init.into());
-    let detector = js_sys::Reflect::construct(&ctor, &args)
-        .map_err(|_| "BarcodeDetector rechazó los formatos".to_string())?;
+    let detector =
+        js_sys::Reflect::construct(&ctor, &args).map_err(|_| i18n.t("ui.scanner.error.formats"))?;
     detector
         .dyn_into()
-        .map_err(|_| "BarcodeDetector no devolvió un objeto".to_string())
+        .map_err(|_| i18n.t("ui.scanner.error.no_object"))
 }
 
 /// Decode one frame, returning the first raw value found.
@@ -207,26 +207,27 @@ fn detector() -> Result<js_sys::Object, String> {
 async fn detect_once(
     detector: &js_sys::Object,
     video: &web_sys::HtmlVideoElement,
+    i18n: &crate::i18n::I18n,
 ) -> Result<Option<String>, String> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
 
     let detect = js_sys::Reflect::get(detector, &JsValue::from_str("detect"))
-        .map_err(|_| "BarcodeDetector no tiene detect()".to_string())?
+        .map_err(|_| i18n.t("ui.scanner.error.no_detect"))?
         .dyn_into::<js_sys::Function>()
-        .map_err(|_| "BarcodeDetector.detect no es una función".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.detect_not_function"))?;
     let promise = detect
         .call1(detector, video)
-        .map_err(|_| "BarcodeDetector.detect falló".to_string())?
+        .map_err(|_| i18n.t("ui.scanner.error.detect_failed"))?
         .dyn_into::<js_sys::Promise>()
-        .map_err(|_| "BarcodeDetector.detect no devolvió una promesa".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.detect_not_promise"))?;
     let results = JsFuture::from(promise)
         .await
-        .map_err(|_| "BarcodeDetector.detect rechazó la lectura".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.detect_rejected"))?;
     let results = results
         .dyn_into::<js_sys::Array>()
-        .map_err(|_| "BarcodeDetector no devolvió una lista".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.no_list"))?;
     for index in 0..results.length() {
         let item = results.get(index);
         let raw = js_sys::Reflect::get(&item, &JsValue::from_str("rawValue"))
@@ -241,28 +242,31 @@ async fn detect_once(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn start_camera(video: &web_sys::HtmlVideoElement) -> Result<(), String> {
+async fn start_camera(
+    video: &web_sys::HtmlVideoElement,
+    i18n: &crate::i18n::I18n,
+) -> Result<(), String> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
 
-    let window = web_sys::window().ok_or_else(|| "No hay ventana del navegador".to_string())?;
+    let window = web_sys::window().ok_or_else(|| i18n.t("ui.scanner.error.window"))?;
     let navigator = window.navigator();
     let devices = navigator
         .media_devices()
-        .map_err(|_| "El navegador no expone getUserMedia".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.get_user_media_missing"))?;
     let constraints = web_sys::MediaStreamConstraints::new();
     constraints.set_video(&JsValue::TRUE);
     constraints.set_audio(&JsValue::FALSE);
     let promise = devices
         .get_user_media_with_constraints(&constraints)
-        .map_err(|_| "No se pudo abrir la cámara".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.camera_open"))?;
     let stream = JsFuture::from(promise)
         .await
-        .map_err(|_| "El usuario o el navegador denegó la cámara".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.camera_denied"))?;
     let stream: web_sys::MediaStream = stream
         .dyn_into()
-        .map_err(|_| "getUserMedia no devolvió un MediaStream".to_string())?;
+        .map_err(|_| i18n.t("ui.scanner.error.no_stream"))?;
     video.set_src_object(Some(&stream));
     let _ = video.play();
     Ok(())

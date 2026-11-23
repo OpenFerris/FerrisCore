@@ -327,7 +327,7 @@ fn SidenavToggleRail() -> impl IntoView {
     view! {
         <button
             data-name="SidenavToggleRail"
-            aria-label="Toggle Sidenav"
+            aria-label=crate::i18n::t("ui.sidenav.toggle")
             tabindex="-1"
             onclick=if ctx.is_none() { ONCLICK_TRIGGER } else { "" }
             on:click=move |_| {

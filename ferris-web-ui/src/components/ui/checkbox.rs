@@ -10,7 +10,7 @@ pub fn Checkbox(
     #[prop(into, optional)] checked: Signal<bool>,
     #[prop(into, optional)] disabled: Signal<bool>,
     #[prop(into, optional)] on_checked_change: Option<Callback<bool>>,
-    #[prop(into, optional, default = "Checkbox".to_string())] aria_label: String,
+    #[prop(into, optional, default = crate::i18n::t("ui.checkbox.label"))] aria_label: String,
     /// Explicit DOM id; a document-unique one is generated when omitted.
     #[prop(into, optional)]
     id: String,

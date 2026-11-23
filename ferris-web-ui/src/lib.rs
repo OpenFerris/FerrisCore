@@ -23,6 +23,7 @@ pub mod components {
 pub use components::{constants, desk, dropdown_builder, hooks, ui, utils};
 
 pub mod catalog;
+pub mod i18n;
 
 /// The per-response CSP nonce.
 ///
