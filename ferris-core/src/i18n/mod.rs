@@ -25,6 +25,10 @@ use std::fmt;
 
 use crate::error::{ConfigError, Error, Result};
 
+pub mod keys;
+
+pub use keys::MetaTranslate;
+
 /// Longest accepted locale tag. BCP 47 allows subtags up to 8 characters, but a
 /// full tag with several extensions stays well under this; the cap exists so a
 /// client cannot hand us an unbounded string.
@@ -41,12 +45,14 @@ const EN_FRAGMENTS: &[&str] = &[
     include_str!("en.desk.toml"),
     include_str!("en.components.toml"),
     include_str!("en.ui.toml"),
+    include_str!("en.meta.toml"),
 ];
 const ES_FRAGMENTS: &[&str] = &[
     include_str!("es.views.toml"),
     include_str!("es.desk.toml"),
     include_str!("es.components.toml"),
     include_str!("es.ui.toml"),
+    include_str!("es.meta.toml"),
 ];
 
 /// A normalized language tag such as `es`, `es-ES` or `pt-BR`.
@@ -185,6 +191,28 @@ impl Catalog {
         self.messages.get(key).map(String::as_str)
     }
 
+    /// Every `(key, message)` pair, ordered by key.
+    ///
+    /// For validation and diagnostics: the runtime lookups go through
+    /// [`Catalog::get`].
+    pub fn messages(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.messages
+            .iter()
+            .map(|(key, message)| (key.as_str(), message.as_str()))
+    }
+
+    /// Number of keys in this catalogue.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Whether this catalogue has no messages.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
     /// Merge a fragment into this catalogue. A later fragment wins on a
     /// duplicate key, which is what lets the split files evolve independently
     /// without a silent conflict in the baseline.
@@ -301,6 +329,45 @@ impl I18n {
         )
     }
 
+    /// Add a catalogue layer from outside the binary (a site or an installed
+    /// app) and advertise its locale.
+    ///
+    /// The layer is merged over whatever this instance already holds for that
+    /// locale, so a missing key keeps the shipped translation instead of
+    /// emptying the catalogue. A locale added this way becomes negotiable,
+    /// which is what lets an app ship a language the binary does not embed.
+    #[must_use]
+    pub fn with_catalog(mut self, catalog: Catalog) -> Self {
+        let tag = catalog.locale().clone();
+        match self.catalogs.get_mut(tag.as_str()) {
+            Some(existing) => existing.extend(catalog),
+            None => {
+                self.catalogs.insert(tag.as_str().to_string(), catalog);
+            }
+        }
+        if !self.supported.contains(&tag) {
+            self.supported.push(tag);
+        }
+        self
+    }
+
+    /// Look a key up without the default/`en` chain, so a caller that supplies
+    /// its own fallback can tell "translated" from "not".
+    ///
+    /// An exact tag wins; `es-MX` falls back to the `es` catalogue before the
+    /// caller's fallback, matching what negotiation promised.
+    #[must_use]
+    pub fn message(&self, locale: &Locale, key: &str) -> Option<&str> {
+        self.lookup(locale, key).or_else(|| {
+            if locale.language() == locale.as_str() {
+                return None;
+            }
+            self.catalogs
+                .get(locale.language())
+                .and_then(|catalog| catalog.get(key))
+        })
+    }
+
     /// Translate `key`, falling back requested locale → default → `en` → key.
     ///
     /// The returned slice borrows either the catalogue or `key` itself; tying
@@ -308,7 +375,7 @@ impl I18n {
     /// without allocating or leaking it.
     #[must_use]
     pub fn translate<'a>(&'a self, locale: &Locale, key: &'a str) -> &'a str {
-        self.lookup(locale, key)
+        self.message(locale, key)
             .or_else(|| self.lookup(&self.default, key))
             .or_else(|| self.lookup_en(key))
             .unwrap_or(key)
@@ -332,8 +399,17 @@ impl I18n {
     #[must_use]
     pub fn catalog_json(&self, locale: &Locale) -> serde_json::Value {
         let mut merged: BTreeMap<&str, &str> = BTreeMap::new();
-        if let Some(en) = self.catalogs.get("en") {
-            for (key, value) in &en.messages {
+        if let Some(catalog) = self.catalogs.get("en") {
+            for (key, value) in &catalog.messages {
+                merged.insert(key.as_str(), value.as_str());
+            }
+        }
+        // A regional request (`es-MX`) reads the base language before the exact
+        // tag, the same order `translate` and negotiation use.
+        if locale.language() != locale.as_str()
+            && let Some(catalog) = self.catalogs.get(locale.language())
+        {
+            for (key, value) in &catalog.messages {
                 merged.insert(key.as_str(), value.as_str());
             }
         }
