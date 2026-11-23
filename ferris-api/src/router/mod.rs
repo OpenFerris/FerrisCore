@@ -2,6 +2,7 @@
 
 mod doctype;
 mod error;
+mod locale;
 mod methods;
 mod resource;
 mod role_permissions;
@@ -10,6 +11,7 @@ mod state;
 mod widget_assets;
 
 pub use error::error_response;
+pub use locale::RequestLocale;
 pub use routes::{api_router_with_app_state, api_router_with_modules};
 pub use state::ApiState;
 

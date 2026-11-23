@@ -1,0 +1,86 @@
+# English fragment: en. Keys are flat and prefixed; `en` and `es` must stay in sync.
+# Built-in copy of the shared UI primitives (`ferris-web-ui`), not the Desk.
+
+# Command palette and command-backed pickers.
+"ui.command.search" = "Search"
+"ui.command.no_results" = "No results."
+"ui.command.select_country" = "Select country"
+"ui.command.country_search" = "Search country…"
+"ui.command.country_search_label" = "Search country"
+"ui.command.all_countries" = "All countries"
+
+# Form controls that ship a default accessible name.
+"ui.checkbox.label" = "Checkbox"
+"ui.switch.label" = "Toggle switch"
+"ui.select.group_label" = "Select options"
+"ui.footer.social_link" = "Social media link"
+"ui.input_prompt.placeholder" = "Write a message…"
+"ui.multi_select.selected_one" = "1 selected"
+"ui.multi_select.selected_many" = "{count} selected"
+"ui.form.required" = "Please fill in all required fields."
+
+# Chrome: spinners, theme toggle, navigation and overlays.
+"ui.spinner.loading" = "Loading"
+"ui.theme_toggle.label" = "Switch between light and dark theme"
+"ui.header.navigation" = "Main"
+"ui.sidenav.toggle" = "Toggle sidebar"
+"ui.dialog.close" = "Close"
+"ui.dialog.close_hidden" = "Close dialog"
+"ui.sheet.close" = "Close"
+"ui.sheet.close_hidden" = "Close sheet"
+"ui.carousel.previous" = "Previous slide"
+"ui.carousel.next" = "Next slide"
+"ui.breadcrumb.show_more" = "Show more"
+"ui.breadcrumb.more" = "More"
+"ui.breadcrumb.open_menu" = "Open menu"
+"ui.pagination.previous" = "previous"
+"ui.pagination.next" = "next"
+"ui.pagination.go_to" = "Go to {direction} page"
+
+# Data grid and charts.
+"ui.data_grid.label" = "Data table"
+"ui.data_grid.body" = "Table body"
+"ui.data_grid.resize_column" = "Resize column"
+"ui.data_grid.select_all" = "Select all"
+"ui.data_grid.sort_asc" = "Sort ascending"
+"ui.data_grid.sort_desc" = "Sort descending"
+"ui.data_grid.remove_sort" = "Remove sort"
+"ui.data_grid.pin_left" = "Pin to left"
+"ui.data_grid.unpin_left" = "Unpin from left"
+"ui.data_grid.hide_column" = "Hide column"
+"ui.chart.area_label" = "Area chart"
+"ui.chart.empty" = "No data"
+
+# Guided tour.
+"ui.tour.label" = "Guided tour"
+"ui.tour.step" = "Step {current} of {total}"
+"ui.tour.previous" = "Previous"
+"ui.tour.next" = "Next"
+"ui.tour.done" = "Done"
+
+# Camera scanner: labels and platform errors.
+"ui.scanner.label" = "Scan"
+"ui.scanner.description" = "Point the camera at the code."
+"ui.scanner.title" = "Scan code"
+"ui.scanner.error.view" = "The camera view is not mounted"
+"ui.scanner.error.window" = "No browser window available"
+"ui.scanner.error.detector_missing" = "The browser does not expose BarcodeDetector"
+"ui.scanner.error.unsupported" = "This browser does not support barcode scanning with BarcodeDetector"
+"ui.scanner.error.detector_not_function" = "BarcodeDetector is not a function"
+"ui.scanner.error.configure" = "Could not configure BarcodeDetector"
+"ui.scanner.error.formats" = "BarcodeDetector rejected the formats"
+"ui.scanner.error.no_object" = "BarcodeDetector did not return an object"
+"ui.scanner.error.no_detect" = "BarcodeDetector has no detect()"
+"ui.scanner.error.detect_not_function" = "BarcodeDetector.detect is not a function"
+"ui.scanner.error.detect_failed" = "BarcodeDetector.detect failed"
+"ui.scanner.error.detect_not_promise" = "BarcodeDetector.detect did not return a promise"
+"ui.scanner.error.detect_rejected" = "BarcodeDetector.detect rejected the scan"
+"ui.scanner.error.no_list" = "BarcodeDetector did not return a list"
+"ui.scanner.error.get_user_media_missing" = "The browser does not expose getUserMedia"
+"ui.scanner.error.camera_open" = "Could not open the camera"
+"ui.scanner.error.camera_denied" = "The user or the browser denied the camera"
+"ui.scanner.error.no_stream" = "getUserMedia did not return a MediaStream"
+
+# Phone input.
+"ui.input_phone.label" = "Phone number"
+"ui.input_phone.clear" = "Clear phone number"

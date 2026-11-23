@@ -24,11 +24,33 @@ pub use ferris_core::themes::{Registration, register_theme, register_themes, reg
 // `ferris-schema`) is converted below and checked by the round-trip test.
 pub use ferris_schema::contract::theme::{ThemeSpec, builtin_themes, dark_theme, light_theme};
 
-use axum::Json;
+use std::sync::Arc;
 
-/// `GET /api/themes` — built-in themes first, then the app-registered ones.
-pub async fn themes() -> Json<Vec<ThemeSpec>> {
-    Json(all_themes())
+use axum::Json;
+use axum::extract::State;
+
+use ferris_core::i18n::{I18n, Locale, MetaTranslate};
+
+use crate::ApiState;
+use crate::router::RequestLocale;
+
+/// `GET /api/themes` — built-in themes first, then the app-registered ones,
+/// labelled in the caller's language.
+pub async fn themes(
+    State(state): State<Arc<ApiState>>,
+    RequestLocale(locale): RequestLocale,
+) -> Json<Vec<ThemeSpec>> {
+    Json(localize_themes(all_themes(), &state.i18n, &locale))
+}
+
+/// Translate each theme's label through `theme.<id>.label`.
+#[must_use]
+pub fn localize_themes(mut themes: Vec<ThemeSpec>, i18n: &I18n, locale: &Locale) -> Vec<ThemeSpec> {
+    let t = MetaTranslate::new(i18n, locale);
+    for theme in &mut themes {
+        theme.label = t.theme_label(&theme.id, &theme.label).into_owned();
+    }
+    themes
 }
 
 /// Built-ins followed by registered extras; a registered theme whose id matches

@@ -11,7 +11,7 @@
 //!   outside the project, so a symlink inside it must not become a way to copy
 //!   `/etc` into `apps/`. Only regular files and directories are copied.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::{Error, FileError, Result};
 
@@ -105,57 +105,4 @@ pub(super) fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     }
     std::fs::copy(src, dst)?;
     Ok(())
-}
-
-/// The path of `to` as seen from the directory `from_dir`.
-///
-/// Used for the instance wasm link, which must be relative: the site tree can be
-/// moved or bind-mounted, and an absolute link baked at install time would point
-/// at the developer's checkout. Both paths must exist (they are canonicalized to
-/// make the component comparison meaningful), so the caller falls back to a copy
-/// when this fails.
-pub(super) fn relative_path(from_dir: &Path, to: &Path) -> Result<PathBuf> {
-    let from = from_dir.canonicalize()?;
-    let to = to.canonicalize()?;
-    let from_components: Vec<Component> = from.components().collect();
-    let to_components: Vec<Component> = to.components().collect();
-    let common = from_components
-        .iter()
-        .zip(&to_components)
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut relative = PathBuf::new();
-    for _ in common..from_components.len() {
-        relative.push("..");
-    }
-    for component in &to_components[common..] {
-        relative.push(component.as_os_str());
-    }
-    if relative.as_os_str().is_empty() {
-        return Err(Error::Validation(crate::ValidationError::Invalid(
-            "cannot link a file to its own directory".to_string(),
-        )));
-    }
-    Ok(relative)
-}
-
-/// Create a symlink to `original` at `link`; the caller falls back to a copy.
-#[cfg(unix)]
-pub(super) fn symlink_file(original: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(original, link)
-}
-
-/// Create a symlink to `original` at `link`; the caller falls back to a copy.
-#[cfg(windows)]
-pub(super) fn symlink_file(original: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(original, link)
-}
-
-/// Platforms without symlinks always take the copy path.
-#[cfg(not(any(unix, windows)))]
-pub(super) fn symlink_file(_original: &Path, _link: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "symbolic links are not supported on this platform",
-    ))
 }

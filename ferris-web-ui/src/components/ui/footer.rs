@@ -40,7 +40,7 @@ pub use components::*;
 pub fn FooterExternalLink(
     children: Children,
     href: &'static str,
-    #[prop(into, optional, default = "Social media link".to_string())] aria_label: String,
+    #[prop(into, optional, default = crate::i18n::t("ui.footer.social_link"))] aria_label: String,
 ) -> impl IntoView {
     let class = "block text-foreground/70 hover:text-primary";
     match safe_href(href) {

@@ -22,6 +22,9 @@ pub struct WebUser {
     pub username: Option<String>,
     pub roles: Vec<String>,
     pub user_type: String,
+    /// The account's chosen locale; `None` follows `Accept-Language`.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 impl WebUser {
@@ -38,6 +41,7 @@ impl WebUser {
             username: Some("Guest".into()),
             roles: vec!["Guest".into()],
             user_type: "Guest".into(),
+            language: None,
         }
     }
 

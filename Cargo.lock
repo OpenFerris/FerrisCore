@@ -813,7 +813,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "ferris-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-auth"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-db"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ferris-core",
  "serde_json",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-document"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-macro"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-schema"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ferris-core",
  "ferris-db",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-web-shared"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ferris-schema",
  "serde",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "ferris-web-ui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ferris-web-shared",
  "icons",

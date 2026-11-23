@@ -57,6 +57,11 @@ pub fn PaginationNavButton(direction: PageDirection) -> impl IntoView {
     let scroll = use_context::<Signal<bool>>().unwrap_or(Signal::from(false));
     let navigate = use_navigate();
 
+    let direction_label = match &direction {
+        PageDirection::Previous => crate::i18n::t("ui.pagination.previous"),
+        PageDirection::Next => crate::i18n::t("ui.pagination.next"),
+    };
+
     let (href, is_disabled, icon) = match direction {
         PageDirection::Previous => (
             ctx.prev_href,
@@ -103,7 +108,10 @@ pub fn PaginationNavButton(direction: PageDirection) -> impl IntoView {
             class=button_class.with_class("")
             class:opacity-0=is_disabled
             class:pointer-events-none=is_disabled
-            aria-label=format!("Go to {} page", direction)
+            aria-label=crate::i18n::t_with(
+                "ui.pagination.go_to",
+                &[("direction", direction_label.as_str())],
+            )
         >
             {icon}
         </a>

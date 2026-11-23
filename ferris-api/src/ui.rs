@@ -31,17 +31,22 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 
+use ferris_core::i18n::{I18n, Locale, MetaTranslate};
 use ferris_core::ui_extensions as registry;
 use ferris_schema::contract;
 
 use crate::ApiState;
+use crate::router::RequestLocale;
 
 /// `GET /api/ui-extensions` — every app's registered slot extensions,
 /// dashboards, widget catalog and website routes, for the Desk to mount.
 ///
 /// The widget migration runs first (idempotent, hash-guarded), then the stored
 /// widgets and dashboards are read. Both reads are additive.
-pub async fn ui_extensions(State(state): State<Arc<ApiState>>) -> Json<contract::UiFeed> {
+pub async fn ui_extensions(
+    State(state): State<Arc<ApiState>>,
+    RequestLocale(locale): RequestLocale,
+) -> Json<contract::UiFeed> {
     // A failed migration keeps the registry's seed: publishing a table that is
     // missing the rows that failed to upsert would silently drop widgets.
     let widgets = if crate::widgets::sync(&state.pool).await {
@@ -53,7 +58,51 @@ pub async fn ui_extensions(State(state): State<Arc<ApiState>>) -> Json<contract:
         .await
         .into_iter()
         .collect();
-    Json(compose(documents, widgets))
+    let mut feed = compose(documents, widgets);
+    localize_feed(&mut feed, &state.i18n, &locale);
+    // The fingerprint covers the localized payload: two languages are two
+    // bodies, and a client that switches language must not keep the previous
+    // one because the revision looked unchanged.
+    feed.revision = contract::revision_of(&serde_json::to_vec(&feed.apps).unwrap_or_default());
+    Json(feed)
+}
+
+/// Translate dashboard, widget, parameter and extension labels in place.
+///
+/// Dashboards and widgets derive their key from their id/name; parameter and
+/// extension labels are free-form, so they are translated only when they are
+/// themselves keys (`app.<app>.<section>`), which is how an app names its own
+/// strings without the host knowing the shape of its catalogue.
+pub fn localize_feed(feed: &mut contract::UiFeed, i18n: &I18n, locale: &Locale) {
+    let t = MetaTranslate::new(i18n, locale);
+    for app in &mut feed.apps {
+        for extension in &mut app.extensions {
+            if let Some(label) = extension.label.take() {
+                extension.label = Some(t.literal(&label).into_owned());
+            }
+        }
+        for dashboard in &mut app.dashboards {
+            dashboard.label = t
+                .dashboard_label(&dashboard.id, &dashboard.label)
+                .into_owned();
+            for widget in &mut dashboard.widgets {
+                if let Some(label) = widget.label.take() {
+                    widget.label = Some(t.literal(&label).into_owned());
+                }
+            }
+        }
+        for widget in &mut app.widgets {
+            widget.label = t.widget_label(&widget.name, &widget.label).into_owned();
+            if let Some(description) = widget.description.take() {
+                widget.description = Some(t.literal(&description).into_owned());
+            }
+            for param in &mut widget.params {
+                if let Some(label) = param.label.take() {
+                    param.label = Some(t.literal(&label).into_owned());
+                }
+            }
+        }
+    }
 }
 
 /// Merge the stored widget catalog into the registry's sets.

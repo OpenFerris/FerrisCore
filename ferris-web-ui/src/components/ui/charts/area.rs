@@ -132,7 +132,7 @@ pub fn AreaChart(
 fn empty_state() -> AnyView {
     view! {
         <p class="flex h-full min-h-24 items-center justify-center text-sm text-muted-foreground">
-            "Sin datos"
+            {crate::i18n::t("ui.chart.empty")}
         </p>
     }
     .into_any()
@@ -154,7 +154,7 @@ fn chart_svg(
             viewBox=format!("0 0 {VIEW_WIDTH} {VIEW_HEIGHT}")
             preserveAspectRatio="none"
             role="img"
-            aria-label="Gráfica de área"
+            aria-label=crate::i18n::t("ui.chart.area_label")
         >
             {gradient.then(|| view! { <defs>{gradient_defs(data, chart_id)}</defs> })}
             <g class="text-border" stroke="currentColor">{grid_lines(data, grid)}</g>

@@ -26,7 +26,7 @@ pub fn Grid(
             role="grid"
             data-name="DataGrid"
             class=merged_class
-            aria-label="Tabla de datos"
+            aria-label=crate::i18n::t("ui.data_grid.label")
             aria-rowcount=move || rowcount.get().to_string()
             aria-colcount=colcount.to_string()
             tabindex="0"
@@ -54,7 +54,7 @@ pub fn GridBody(
             role="rowgroup"
             data-name="GridBody"
             class=merged_class
-            aria-label="Cuerpo de la tabla"
+            aria-label=crate::i18n::t("ui.data_grid.body")
             tabindex="0"
             style=move || style.get()
         >
@@ -123,7 +123,7 @@ pub fn VirtualizedGridBody(
             role="rowgroup"
             data-name="GridBody"
             class=merged_class
-            aria-label="Cuerpo de la tabla"
+            aria-label=crate::i18n::t("ui.data_grid.body")
             tabindex="0"
             style=move || format!("height: {}px;", virtual_scroll.total_height.get())
         >

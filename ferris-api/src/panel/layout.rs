@@ -15,6 +15,7 @@ use ferris_schema::contract::{DeskIconPlacement, DeskLayout};
 use super::context::{panel_context, subject_context};
 use crate::ApiState;
 use crate::core_doctypes::DESK_LAYOUT;
+use crate::router::RequestLocale;
 use crate::store::{document_exists, effective_meta};
 
 /// `GET /api/desk-layout` — the signed-in user's desk: the grid they arranged,
@@ -25,6 +26,7 @@ use crate::store::{document_exists, effective_meta};
 pub async fn get_desk_layout<S>(
     State(state): State<std::sync::Arc<ApiState>>,
     user: AuthenticatedUser,
+    RequestLocale(locale): RequestLocale,
 ) -> Response
 where
     std::sync::Arc<ApiState>: FromRef<S>,
@@ -33,7 +35,11 @@ where
 {
     let user_id = user.0.id.clone();
     let saved = stored_layout(&state.pool, &user_id).await;
-    Json(crate::desk::load_layout(&state.pool, saved.as_deref()).await).into_response()
+    Json(
+        crate::desk::load_layout_localized(&state.pool, saved.as_deref(), &state.i18n, &locale)
+            .await,
+    )
+    .into_response()
 }
 
 /// `PUT /api/desk-layout` — save the signed-in user's arrangement of the grid.

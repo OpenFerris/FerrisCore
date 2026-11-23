@@ -6,6 +6,7 @@ use crate::components::hooks::use_theme_mode::use_theme_mode;
 #[component]
 pub fn ThemeToggle() -> impl IntoView {
     let theme_mode = use_theme_mode();
+    let theme_label = crate::i18n::t("ui.theme_toggle.label");
 
     view! {
         <style>
@@ -48,8 +49,8 @@ pub fn ThemeToggle() -> impl IntoView {
 
         <button
             type="button"
-            aria-label="Cambiar entre tema claro y oscuro"
-            title="Cambiar entre tema claro y oscuro"
+            aria-label=theme_label.clone()
+            title=theme_label
             class=move || {
                 let base_class = "theme__toggle_transition inline-flex size-9 max-md:size-10 shrink-0 items-center justify-center rounded-md text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
                 if theme_mode.get() {

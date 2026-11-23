@@ -38,6 +38,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use ferris_core::i18n::Locale;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -412,6 +413,49 @@ pub async fn logout_all(State(h): State<SessionHandlers>, headers: HeaderMap) ->
     let mut response = StatusCode::NO_CONTENT.into_response();
     set_cookie(&mut response, &h.config.clear_cookie().to_string());
     response
+}
+
+/// `PUT /api/auth/language` — persist the caller's chosen locale.
+///
+/// The Desk sends the normalized tag from its language picker; an empty string
+/// clears the preference so the account follows `Accept-Language` again. The
+/// route is mounted with the CSRF gate, like logout: it changes the account.
+#[derive(Debug, Deserialize)]
+pub struct SetLanguageRequest {
+    pub language: String,
+}
+
+pub async fn set_language(
+    State(h): State<SessionHandlers>,
+    headers: HeaderMap,
+    Json(req): Json<SetLanguageRequest>,
+) -> Response {
+    let Some(sid) = session_cookie(&h.config, &headers) else {
+        return unauthorized("not signed in");
+    };
+    let Ok(Some(s)) = h.session_manager.touch_session(&sid).await else {
+        return unauthorized("session expired");
+    };
+    if s.is_expired() || s.is_idle_expired(h.config.idle_timeout_minutes) {
+        return unauthorized("session expired");
+    }
+    if !matches!(h.user_store.find_by_id(&s.user_id).await, Ok(Some(_))) {
+        return unauthorized("not signed in");
+    }
+    let raw = req.language.trim();
+    let language = if raw.is_empty() {
+        None
+    } else {
+        match Locale::parse(raw) {
+            Some(locale) => Some(locale),
+            None => return (StatusCode::BAD_REQUEST, "invalid language tag").into_response(),
+        }
+    };
+    let value = language.as_ref().map(Locale::as_str);
+    match h.user_store.set_language(&s.user_id, value).await {
+        Ok(()) => Json(serde_json::json!({ "language": value })).into_response(),
+        Err(error) => internal(error),
+    }
 }
 
 /// `GET /api/auth/session` — the authenticated user, or `401` when the cookie

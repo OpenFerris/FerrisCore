@@ -18,6 +18,7 @@ pub mod config;
 pub mod error;
 pub mod hooks;
 pub mod host_features;
+pub mod i18n;
 pub mod identity;
 pub mod notifications;
 pub mod password;
@@ -47,6 +48,7 @@ pub use error::{
     SerializationError, ValidationError, WorkflowError,
 };
 pub use hooks::{DocStatus, DocumentHook, Hook, HookContext, HookPoint, HookRegistry};
+pub use i18n::{Catalog, I18n, Locale, negotiate};
 pub use identity::ClientIdentity;
 pub use permissions::{
     ParsePermissionError, Permission, PermissionEngine, PermissionRule, Resource,

@@ -32,6 +32,37 @@ const fn default_enabled() -> bool {
 /// `common_site_config.json` so a deployment can override it once.
 pub(super) const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6379";
 
+/// The locale a site serves when it names none, and the one locale the binary
+/// is guaranteed to have a catalogue for.
+pub const DEFAULT_LOCALE: &str = "en";
+
+fn default_locale() -> String {
+    DEFAULT_LOCALE.to_string()
+}
+
+fn default_supported_locales() -> Vec<String> {
+    // Both catalogues the binary embeds. A site with no `[i18n]` policy is
+    // still useful in Spanish; the HTML falls back to English for any missing
+    // key, so advertising both costs nothing.
+    vec![DEFAULT_LOCALE.to_string(), "es".to_string()]
+}
+
+/// Trim, drop blanks and duplicates, and never return an empty policy.
+fn normalize_locales(locales: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::with_capacity(locales.len());
+    for locale in locales {
+        let locale = locale.trim();
+        if !locale.is_empty() && !normalized.iter().any(|seen| seen == locale) {
+            normalized.push(locale.to_string());
+        }
+    }
+    if normalized.is_empty() {
+        default_supported_locales()
+    } else {
+        normalized
+    }
+}
+
 /// A site's configuration, as `sites/<site>/site_config.json` stores it.
 #[derive(Debug, Clone)]
 pub struct SiteConfig {
@@ -49,6 +80,17 @@ pub struct SiteConfig {
     pub apps: Vec<String>,
     /// Per-site overrides for an app's `[config]` defaults, keyed by app name.
     pub plugins: BTreeMap<String, serde_json::Value>,
+    /// Version of each installed app, captured from the catalogue at the
+    /// moment its component was copied into this site.
+    ///
+    /// The instance owns a real copy of the wasm, so this map is the record of
+    /// what that copy is: replacing `apps/<app>/<app>.wasm` does not change it,
+    /// and `install_app(..., force = true)` is the only writer.
+    pub app_versions: BTreeMap<String, String>,
+    /// Locale served when the client sends no usable `Accept-Language`.
+    pub default_locale: String,
+    /// Locales this site advertises through `GET /api/i18n`.
+    pub supported_locales: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -69,6 +111,9 @@ impl SiteConfig {
             files_path: PathBuf::new(),
             apps: Vec::new(),
             plugins: BTreeMap::new(),
+            app_versions: BTreeMap::new(),
+            default_locale: DEFAULT_LOCALE.to_string(),
+            supported_locales: default_supported_locales(),
             created_at: now,
             updated_at: now,
         }
@@ -135,6 +180,9 @@ impl SiteConfig {
             files_path: PathBuf::from(file.files_path),
             apps: file.apps,
             plugins: file.plugins,
+            app_versions: file.app_versions,
+            default_locale: non_empty(file.default_locale, DEFAULT_LOCALE),
+            supported_locales: normalize_locales(file.supported_locales),
             created_at: file.created_at.unwrap_or_else(Utc::now),
             updated_at: file.updated_at.unwrap_or_else(Utc::now),
         })
@@ -155,6 +203,9 @@ impl SiteConfig {
             files_path: self.files_path.to_string_lossy().into_owned(),
             apps: self.apps.clone(),
             plugins: self.plugins.clone(),
+            app_versions: self.app_versions.clone(),
+            default_locale: self.default_locale.clone(),
+            supported_locales: self.supported_locales.clone(),
             created_at: Some(self.created_at),
             updated_at: Some(self.updated_at),
             db_name: self.database.name.clone(),
@@ -188,6 +239,12 @@ struct SiteFile {
     apps: Vec<String>,
     #[serde(default)]
     plugins: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    app_versions: BTreeMap<String, String>,
+    #[serde(default = "default_locale")]
+    default_locale: String,
+    #[serde(default = "default_supported_locales")]
+    supported_locales: Vec<String>,
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
     #[serde(default)]

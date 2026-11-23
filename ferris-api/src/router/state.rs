@@ -12,6 +12,9 @@ use crate::module::OpenApiFragment;
 pub struct ApiState {
     pub pool: Db,
     pub methods: MethodRegistry,
+    /// The catalogue set metadata endpoints translate against. The composition
+    /// root replaces the English-only default with the instance policy.
+    pub i18n: ferris_core::i18n::I18n,
     /// The operator policy document path, reloaded after every Role Permissions
     /// Builder edit so those rows never silently drop the operator JSON.
     pub policy_path: Option<std::path::PathBuf>,
@@ -36,6 +39,7 @@ impl ApiState {
     pub fn new(pool: Db) -> Self {
         Self {
             pool,
+            i18n: ferris_core::i18n::I18n::default(),
             methods: MethodRegistry::new(),
             policy_path: None,
             mfa: MfaManager::new(MfaConfig::default()),
@@ -65,6 +69,14 @@ impl ApiState {
     #[must_use]
     pub fn with_openapi_fragments(mut self, fragments: Vec<OpenApiFragment>) -> Self {
         self.openapi_fragments = Arc::from(fragments);
+        self
+    }
+
+    /// Carry the instance's catalogue set, so `/api/*` projects metadata in the
+    /// caller's language.
+    #[must_use]
+    pub fn with_i18n(mut self, i18n: ferris_core::i18n::I18n) -> Self {
+        self.i18n = i18n;
         self
     }
 

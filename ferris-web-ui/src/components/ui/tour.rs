@@ -171,11 +171,26 @@ pub fn Tour(
                 let has_description = !description.is_empty();
                 let last = index.get() + 1 >= current.len();
                 view! {
-                    <div class=position role="dialog" aria-modal="false" aria-label="Tour del formulario">
+                    <div
+                        class=position
+                        role="dialog"
+                        aria-modal="false"
+                        aria-label=crate::i18n::t("ui.tour.label")
+                    >
                         <Card class="w-full max-w-md shadow-lg">
                             <CardHeader>
                                 <p class="text-xs font-medium text-muted-foreground">
-                                    {move || format!("Paso {} de {}", index.get() + 1, total())}
+                                    {move || {
+                                        let current = (index.get() + 1).to_string();
+                                        let total = total().to_string();
+                                        crate::i18n::t_with(
+                                            "ui.tour.step",
+                                            &[
+                                                ("current", current.as_str()),
+                                                ("total", total.as_str()),
+                                            ],
+                                        )
+                                    }}
                                 </p>
                                 <CardTitle>{title}</CardTitle>
                             </CardHeader>
@@ -190,7 +205,7 @@ pub fn Tour(
                                         attr:disabled=move || index.get() == 0
                                         on:click=move |_| index.update(|i| *i = i.saturating_sub(1))
                                     >
-                                        "Anterior"
+                                        {crate::i18n::t("ui.tour.previous")}
                                     </Button>
                                     <Button
                                         variant=ButtonVariant::Default
@@ -203,7 +218,11 @@ pub fn Tour(
                                             }
                                         }
                                     >
-                                        {if last { "Listo" } else { "Siguiente" }}
+                                        {if last {
+                                            crate::i18n::t("ui.tour.done")
+                                        } else {
+                                            crate::i18n::t("ui.tour.next")
+                                        }}
                                     </Button>
                                 </div>
                             </CardContent>

@@ -11,7 +11,7 @@ use ferris_core::permissions::{Permission, Resource, SYSTEM_MANAGER_ROLE, check_
 use ferris_core::{Error, Value};
 use ferris_schema::DoctypeMeta;
 
-use super::{ApiState, error_response};
+use super::{ApiState, RequestLocale, error_response};
 
 /// Whether `user` may read the metadata of `meta`.
 ///
@@ -42,6 +42,7 @@ fn may_read_metadata(user: &User, meta: &DoctypeMeta) -> bool {
 /// decision and what is returned cannot disagree.
 pub(super) async fn meta(
     State(state): State<Arc<ApiState>>,
+    RequestLocale(locale): RequestLocale,
     Path(doctype): Path<String>,
 ) -> Response {
     let Some(user) = ferris_document::current_user() else {
@@ -62,8 +63,13 @@ pub(super) async fn meta(
             resource: format!("doctype `{}`", meta.name),
         }));
     }
-    match ferris_schema::registry::dyn_meta(&state.pool, &meta).await {
-        Ok(payload) => Json(payload).into_response(),
+    match crate::doc_meta::effective_dyn_meta_localized(&state.pool, &doctype, &state.i18n, &locale)
+        .await
+    {
+        Ok(Some(payload)) => Json(payload).into_response(),
+        Ok(None) => error_response(Error::Schema(ferris_core::SchemaError::DocTypeNotFound(
+            doctype,
+        ))),
         Err(e) => error_response(e),
     }
 }
@@ -71,10 +77,20 @@ pub(super) async fn meta(
 /// `GET /api/doctype/actions/{doctype}` — the DocType Action rows.
 pub(super) async fn doc_actions(
     State(state): State<Arc<ApiState>>,
+    RequestLocale(locale): RequestLocale,
     Path(doctype): Path<String>,
 ) -> Response {
     match crate::doc_meta::doc_actions(&state.pool, &doctype).await {
-        Ok(actions) => Json(serde_json::json!({ "actions": actions })).into_response(),
+        Ok(mut actions) => {
+            // Stored labels may be catalogue keys (`app.<app>.<key>`); translate
+            // them when the catalogue knows them and keep the text otherwise.
+            let translator = ferris_core::i18n::MetaTranslate::new(&state.i18n, &locale);
+            for action in &mut actions {
+                let translated = translator.literal(&action.label).into_owned();
+                action.label = translated;
+            }
+            Json(serde_json::json!({ "actions": actions })).into_response()
+        }
         Err(e) => error_response(e),
     }
 }

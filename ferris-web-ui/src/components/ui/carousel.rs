@@ -237,9 +237,14 @@ pub fn CarouselPrevious(#[prop(optional, into)] class: String) -> impl IntoView 
     );
 
     view! {
-        <button data-name="CarouselPrevious" data-carousel-prev=ctx.carousel_id class=class aria-label="Previous slide">
+        <button
+            data-name="CarouselPrevious"
+            data-carousel-prev=ctx.carousel_id
+            class=class
+            aria-label=crate::i18n::t("ui.carousel.previous")
+        >
             <ChevronLeft class="size-4" />
-            <span class="sr-only">"Previous slide"</span>
+            <span class="sr-only">{crate::i18n::t("ui.carousel.previous")}</span>
         </button>
     }
 }
@@ -264,9 +269,14 @@ pub fn CarouselNext(#[prop(optional, into)] class: String) -> impl IntoView {
     );
 
     view! {
-        <button data-name="CarouselNext" data-carousel-next=ctx.carousel_id class=class aria-label="Next slide">
+        <button
+            data-name="CarouselNext"
+            data-carousel-next=ctx.carousel_id
+            class=class
+            aria-label=crate::i18n::t("ui.carousel.next")
+        >
             <ChevronRight class="size-4" />
-            <span class="sr-only">"Next slide"</span>
+            <span class="sr-only">{crate::i18n::t("ui.carousel.next")}</span>
         </button>
     }
 }

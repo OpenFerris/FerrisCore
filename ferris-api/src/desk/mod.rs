@@ -12,6 +12,8 @@ mod search;
 #[cfg(test)]
 mod tests;
 
-pub use layout::{build_layout, layout_from, load_layout, modules};
+pub use layout::{
+    build_layout, layout_from, load_layout, load_layout_localized, localize_layout, modules,
+};
 pub use modules::workspace_warnings;
 pub use search::{SearchQuery, search};

@@ -52,12 +52,12 @@ pub fn BreadcrumbPage(#[prop(into, optional)] class: String, children: Children)
 pub fn BreadcrumbEllipsis(#[prop(into, optional)] class: String) -> impl IntoView {
     // TODO. data_state
     view! {
-        <RootEllipsisBtn attr:r#type="button" attr:aria-label="Mostrar más" attr:aria-haspopup="menu" attr:aria-expanded="false" attr:data-state="closed">
+        <RootEllipsisBtn attr:r#type="button" attr:aria-label=crate::i18n::t("ui.breadcrumb.show_more") attr:aria-haspopup="menu" attr:aria-expanded="false" attr:data-state="closed">
             <RootEllipsis attr:role="presentation" attr:aria-hidden="true">
                 <Ellipsis class=class />
-                <span class="hidden">"Más"</span>
+                <span class="hidden">{crate::i18n::t("ui.breadcrumb.more")}</span>
             </RootEllipsis>
-            <span class="hidden">"Abrir menú"</span>
+            <span class="hidden">{crate::i18n::t("ui.breadcrumb.open_menu")}</span>
         </RootEllipsisBtn>
     }
 }

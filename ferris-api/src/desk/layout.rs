@@ -3,6 +3,7 @@
 use axum::{Json, extract::State};
 use std::collections::{HashMap, HashSet};
 
+use ferris_core::i18n::{I18n, Locale, MetaTranslate};
 use ferris_core::workspaces::{DEFAULT_FOLDER_ICON, WorkspaceFolderSpec, WorkspaceSpec};
 use ferris_schema::contract::{
     DeskIcon, DeskIconPlacement, DeskLayout, DeskModule, pretty_identifier,
@@ -10,6 +11,7 @@ use ferris_schema::contract::{
 
 use super::modules::{auto_modules, doctype_modules, workspace_module};
 use crate::ApiState;
+use crate::router::RequestLocale;
 
 /// `GET /api/modules` — the desk as the apps declared it: the seeded grid and the
 /// workspaces with their sidebar links.
@@ -31,8 +33,11 @@ use crate::ApiState;
 /// lives behind `GET /api/desk-layout` (`crate::panel`), which merges their
 /// saved placements over the same seed; only `ferris-web` reads either, and it
 /// reads the personalized one.
-pub async fn modules(State(state): State<std::sync::Arc<ApiState>>) -> Json<DeskLayout> {
-    Json(load_layout(&state.pool, None).await)
+pub async fn modules(
+    State(state): State<std::sync::Arc<ApiState>>,
+    RequestLocale(locale): RequestLocale,
+) -> Json<DeskLayout> {
+    Json(load_layout_localized(&state.pool, None, &state.i18n, &locale).await)
 }
 
 /// The desk for a signed-in request: the stored `Workspace` documents laid out,
@@ -52,6 +57,84 @@ pub async fn load_layout(pool: &ferris_db::Db, saved: Option<&[DeskIconPlacement
     };
     let folders = ferris_core::workspaces::registered_folders();
     layout_from(&declared, &folders, saved)
+}
+
+/// [`load_layout`], with workspace and link labels resolved for `locale`.
+pub async fn load_layout_localized(
+    pool: &ferris_db::Db,
+    saved: Option<&[DeskIconPlacement]>,
+    i18n: &I18n,
+    locale: &Locale,
+) -> DeskLayout {
+    let mut layout = load_layout(pool, saved).await;
+    localize_layout(&mut layout, i18n, locale);
+    layout
+}
+
+/// Translate every label of a built layout in place.
+///
+/// DocType links derive their key from the doctype (`doctype.<Name>.label`)
+/// because the sidebar normally prints the raw name; links and groups the app
+/// named itself are translated only when that name is a catalogue key, so an
+/// app can ship `app.<app>.<section>` without the host knowing it.
+pub fn localize_layout(layout: &mut DeskLayout, i18n: &I18n, locale: &Locale) {
+    let t = MetaTranslate::new(i18n, locale);
+    for icon in &mut layout.icons {
+        localize_icon(icon, &t);
+    }
+    for workspace in &mut layout.workspaces {
+        localize_module(workspace, &t);
+    }
+}
+
+fn localize_module(module: &mut DeskModule, t: &MetaTranslate<'_>) {
+    module.label = t.workspace_label(&module.name, &module.label).into_owned();
+    for item in &mut module.items {
+        localize_entry(item, t, &module.name);
+    }
+}
+
+fn localize_entry(
+    entry: &mut ferris_schema::contract::DeskSidebarEntry,
+    t: &MetaTranslate<'_>,
+    workspace: &str,
+) {
+    entry.label = if entry.kind == "doctype" {
+        let doctype = entry.doctype.clone().unwrap_or_default();
+        if entry.label.trim().is_empty() || entry.label == doctype {
+            let fallback = if entry.label.trim().is_empty() {
+                pretty_identifier(&doctype)
+            } else {
+                entry.label.clone()
+            };
+            t.doctype_label(&doctype, &fallback).into_owned()
+        } else {
+            t.literal(&entry.label).into_owned()
+        }
+    } else {
+        // A link or group is named by the app: the workspace-scoped key first,
+        // then the label itself when it is a key, then the text as written.
+        let scoped = t.workspace_item_label(workspace, &entry.label).into_owned();
+        if scoped != entry.label {
+            scoped
+        } else {
+            t.literal(&entry.label).into_owned()
+        }
+    };
+    for child in &mut entry.children {
+        localize_entry(child, t, workspace);
+    }
+}
+
+fn localize_icon(icon: &mut DeskIcon, t: &MetaTranslate<'_>) {
+    icon.label = if icon.is_folder() {
+        t.folder_label(&icon.id, &icon.label).into_owned()
+    } else {
+        t.workspace_label(&icon.id, &icon.label).into_owned()
+    };
+    for item in &mut icon.items {
+        localize_icon(item, t);
+    }
 }
 
 /// Build the desk from the compiled registry. Kept synchronous and free of I/O
@@ -292,5 +375,87 @@ fn label_of(label: &str, id: &str) -> String {
         pretty_identifier(id)
     } else {
         label.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferris_schema::contract::DeskSidebarEntry;
+
+    fn i18n(locale: &str) -> I18n {
+        I18n::new(
+            Locale::parse(locale).expect("the fixture tag parses"),
+            Vec::new(),
+        )
+    }
+
+    fn entry(kind: &str, label: &str, doctype: Option<&str>) -> DeskSidebarEntry {
+        DeskSidebarEntry {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            doctype: doctype.map(str::to_string),
+            ..DeskSidebarEntry::default()
+        }
+    }
+
+    /// The sidebar and the grid are translated in one pass: workspace, DocType
+    /// link and the group the app named itself (through the workspace-scoped
+    /// key). Nothing that identifies a link changes.
+    #[test]
+    fn a_layout_is_localized_without_touching_identifiers() {
+        let mut layout = DeskLayout {
+            icons: vec![DeskIcon {
+                id: "users".into(),
+                kind: "workspace".into(),
+                label: "Users".into(),
+                ..DeskIcon::default()
+            }],
+            workspaces: vec![DeskModule {
+                name: "users".into(),
+                label: "Users".into(),
+                module: "users".into(),
+                icon: None,
+                items: vec![
+                    entry("doctype", "User", Some("User")),
+                    entry("group", "Logs", None),
+                    entry("url", "evhttps", None),
+                ],
+            }],
+        };
+
+        let spanish = Locale::parse("es").expect("es parses");
+        localize_layout(&mut layout, &i18n("es"), &spanish);
+
+        assert_eq!(layout.workspaces[0].label, "Usuarios");
+        assert_eq!(layout.workspaces[0].name, "users");
+        assert_eq!(layout.workspaces[0].items[0].label, "Usuario");
+        assert_eq!(
+            layout.workspaces[0].items[0].doctype.as_deref(),
+            Some("User")
+        );
+        assert_eq!(layout.workspaces[0].items[1].label, "Registros");
+        assert_eq!(layout.workspaces[0].items[2].label, "evhttps");
+        assert_eq!(layout.icons[0].label, "Usuarios");
+    }
+
+    /// A language without a catalogue entry keeps the declared text instead of
+    /// printing the key.
+    #[test]
+    fn an_untranslated_label_falls_back_to_the_declared_text() {
+        let mut layout = DeskLayout {
+            icons: Vec::new(),
+            workspaces: vec![DeskModule {
+                name: "custom".into(),
+                label: "Custom".into(),
+                module: "custom".into(),
+                icon: None,
+                items: vec![entry("route", "app.shop.orders", None)],
+            }],
+        };
+        let english = Locale::parse("en").expect("en parses");
+        localize_layout(&mut layout, &i18n("en"), &english);
+        assert_eq!(layout.workspaces[0].label, "Custom");
+        assert_eq!(layout.workspaces[0].items[0].label, "app.shop.orders");
     }
 }

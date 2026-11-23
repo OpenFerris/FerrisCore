@@ -27,7 +27,7 @@ pub use components::*;
 pub fn SelectGroup(
     children: Children,
     #[prop(optional, into)] class: String,
-    #[prop(default = "Select options".into(), into)] aria_label: String,
+    #[prop(default = crate::i18n::t("ui.select.group_label"), into)] aria_label: String,
 ) -> impl IntoView {
     let merged_class = tw_merge!("group", class);
 

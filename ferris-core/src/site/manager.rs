@@ -48,6 +48,14 @@ pub const CONFIG_FILE: &str = "config.toml";
 /// Static assets shipped next to an app component.
 pub const ASSETS_DIR: &str = "assets";
 
+/// The app's own translation catalogues (`locales/<tag>.toml`).
+///
+/// The locales are declared in the WIT descriptor; the messages travel in the
+/// package, next to `plugin.toml`, so a translator can update them without
+/// rebuilding the component. `site install-app` copies the directory into the
+/// instance, where the host merges it into the site's catalogue set at boot.
+pub const LOCALES_DIR: &str = "locales";
+
 /// Files neither the site nor its plugins may publish.
 const PRIVATE_FILES: &str = "private/files";
 

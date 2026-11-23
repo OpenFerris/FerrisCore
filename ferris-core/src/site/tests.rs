@@ -399,3 +399,103 @@ fn site_config_round_trips_the_flat_frappe_keys() {
     assert_eq!(mariadb.database.r#type, DatabaseType::MySQL);
     assert!(SiteConfig::from_json("{\"db_type\": \"oracle\"}", "erp").is_err());
 }
+
+/// A site copies the component and pins the version it installed: replacing
+/// the catalogue must not change what the site serves until `force`.
+#[test]
+fn the_instance_is_a_copy_pinned_to_the_installed_version() {
+    let (manager, root) = temp_manager("copy");
+    manager.create(site("acme")).unwrap();
+    let package = app_package(&root, "facturacion");
+    std::fs::write(package.join("facturacion.wasm"), b"version-one").unwrap();
+    manager.install_global_app(&package).unwrap();
+    manager.install_app("acme", "facturacion", false).unwrap();
+
+    let instance = manager
+        .sites_root()
+        .join("acme/plugins/facturacion/facturacion.wasm");
+    assert!(instance.is_file(), "the instance must carry the component");
+    assert!(
+        !std::fs::symlink_metadata(&instance)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the component must be a copy, not a symlink"
+    );
+    assert_eq!(std::fs::read(&instance).unwrap(), b"version-one");
+    assert_eq!(
+        manager
+            .installed_app_version("acme", "facturacion")
+            .unwrap(),
+        Some("0.1.0".to_string())
+    );
+
+    // Moving the catalogue forward does not touch the pinned copy.
+    std::fs::write(
+        manager.apps_root().join("facturacion/facturacion.wasm"),
+        b"version-two",
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read(&instance).unwrap(),
+        b"version-one",
+        "the site keeps serving its pinned component"
+    );
+
+    // An explicit upgrade copies the new component.
+    manager.install_app("acme", "facturacion", true).unwrap();
+    assert_eq!(std::fs::read(&instance).unwrap(), b"version-two");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_old_site_config_loads_with_the_new_defaults() {
+    let json = r#"{"name":"acme","db_type":"sqlite","db_name":"acme"}"#;
+    let config = SiteConfig::from_json(json, "acme").unwrap();
+    assert_eq!(config.default_locale, "en");
+    assert!(config.supported_locales.contains(&"es".to_string()));
+    assert!(config.app_versions.is_empty());
+}
+
+/// A site installed before the copy model has a symlink to the catalogue.
+/// Booting or migrating it must turn that link into the pinned copy.
+#[cfg(unix)]
+#[test]
+fn a_legacy_symlink_is_materialized_into_a_copy() {
+    let (manager, root) = temp_manager("materialize");
+    manager.create(site("acme")).unwrap();
+    let package = app_package(&root, "facturacion");
+    manager.install_global_app(&package).unwrap();
+    manager.install_app("acme", "facturacion", false).unwrap();
+
+    let instance = manager
+        .sites_root()
+        .join("acme/plugins/facturacion/facturacion.wasm");
+    std::fs::remove_file(&instance).unwrap();
+    std::os::unix::fs::symlink(
+        manager.apps_root().join("facturacion/facturacion.wasm"),
+        &instance,
+    )
+    .unwrap();
+
+    // A pre-record install has no version yet.
+    let mut config = manager.get("acme").unwrap();
+    config.app_versions.clear();
+    manager.update(&config).unwrap();
+
+    assert_eq!(manager.materialize_instance_components("acme").unwrap(), 1);
+    assert!(
+        !std::fs::symlink_metadata(&instance)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link must become a real copy"
+    );
+    assert_eq!(
+        manager
+            .installed_app_version("acme", "facturacion")
+            .unwrap(),
+        Some("0.1.0".to_string())
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

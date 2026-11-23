@@ -13,10 +13,8 @@ use crate::plugins::{WORLD_DIRS, is_valid_app_name};
 use crate::{ConfigError, Error, Result, ValidationError};
 
 use super::config::SiteConfig;
-use super::fsx::{
-    copy_tree, create_private_dir, relative_path, symlink_file, write_private, write_private_atomic,
-};
-use super::manager::{APPS_FILE, ASSETS_DIR, CONFIG_FILE, SiteManager};
+use super::fsx::{copy_tree, create_private_dir, write_private, write_private_atomic};
+use super::manager::{APPS_FILE, ASSETS_DIR, CONFIG_FILE, LOCALES_DIR, SiteManager};
 use super::manifest::{AppManifest, PLUGIN_MANIFEST, TEMPLATE_WORLD};
 
 impl SiteManager {
@@ -82,6 +80,30 @@ impl SiteManager {
         }
         copy_world_template(&source.template_world, &world, false)?;
 
+        // Access rules travel with the package; `ferris site install-app`
+        // applies them to the site's database.
+        let docperm = package.join("docperm.toml");
+        let installed_docperm = dest.join("docperm.toml");
+        if docperm.is_file() {
+            std::fs::copy(&docperm, &installed_docperm)?;
+        } else if installed_docperm.is_file() {
+            // A re-install without the file must not keep the old grants.
+            std::fs::remove_file(&installed_docperm)?;
+        }
+
+        let locales = dest.join(LOCALES_DIR);
+        let package_locales = package.join(LOCALES_DIR);
+        if package_locales.is_dir() {
+            if locales.is_dir() {
+                std::fs::remove_dir_all(&locales)?;
+            }
+            copy_tree(&package_locales, &locales)?;
+        } else if locales.is_dir() {
+            // A re-install without catalogues must not keep the old ones: the
+            // locale policy and the messages would disagree.
+            std::fs::remove_dir_all(&locales)?;
+        }
+
         let assets = dest.join(ASSETS_DIR);
         let package_assets = package.join(ASSETS_DIR);
         if package_assets.is_dir() {
@@ -103,8 +125,8 @@ impl SiteManager {
     }
 
     /// Install `app` into `site`: copy the template `world/` to the instance
-    /// scope, write `config.toml`, link the component and record the app in
-    /// `apps.txt`.
+    /// scope, write `config.toml`, copy the component and record the app and
+    /// its version in `apps.txt`/`site_config.json`.
     ///
     /// The instance is what the guest mounts, so it is the only copy that gets
     /// written. Its `secrets/` is always created empty and its `data/` and
@@ -142,14 +164,27 @@ impl SiteManager {
         let text = render_instance_config(site, &manifest, overrides, previous.as_deref())?;
         write_private(&config_path, &text)?;
 
-        link_component(&manifest.wasm, &instance, app)?;
+        copy_component(&manifest.wasm, &instance, app)?;
+
+        // The app's catalogues travel with it. A missing directory clears the
+        // previous ones, for the same reason the catalogue install does.
+        let catalogue_locales = self.global_app_dir(app)?.join(LOCALES_DIR);
+        let instance_locales = instance.join(LOCALES_DIR);
+        if catalogue_locales.is_dir() {
+            if instance_locales.is_dir() {
+                std::fs::remove_dir_all(&instance_locales)?;
+            }
+            copy_tree(&catalogue_locales, &instance_locales)?;
+        } else if instance_locales.is_dir() {
+            std::fs::remove_dir_all(&instance_locales)?;
+        }
 
         let mut apps = self.read_apps(site)?;
         if !apps.iter().any(|name| name == app) {
             apps.push(app.to_string());
         }
         self.write_apps(site, &apps)?;
-        self.sync_site_apps(&site_config, apps)?;
+        self.sync_site_state(&site_config, apps, Some((app, manifest.version.clone())))?;
         Ok(manifest)
     }
 
@@ -173,11 +208,71 @@ impl SiteManager {
             .filter(|name| name != app)
             .collect();
         self.write_apps(site, &apps)?;
-        self.sync_site_apps(&site_config, apps)?;
+        let mut updated = site_config.clone();
+        updated.apps = apps;
+        let had_version = updated.app_versions.remove(app).is_some();
+        if updated.apps != site_config.apps || had_version {
+            self.update(&updated)?;
+        }
         if purge && instance.is_dir() {
             std::fs::remove_dir_all(&instance)?;
         }
         Ok(())
+    }
+
+    /// Replace legacy symlinked instance components with real copies.
+    ///
+    /// Before the copy model, `sites/<site>/plugins/<app>/<app>.wasm` was a
+    /// link to the catalogue. That defeats the version pin: changing the
+    /// catalogue changed every site. This upgrades an existing site in place on
+    /// its next boot/migrate, records the catalogue's version when the site has
+    /// none, and leaves already-copied components alone.
+    ///
+    /// Returns how many components were materialized.
+    ///
+    /// # Errors
+    ///
+    /// A broken link (its target is gone), a site that cannot be read, or a
+    /// write failure. A broken install fails loudly instead of serving a link
+    /// to nothing.
+    pub fn materialize_instance_components(&self, site: &str) -> Result<usize> {
+        let config = self.get(site)?;
+        let mut updated = config.clone();
+        let mut copied = 0;
+        for app in self.installed_apps(site)? {
+            let instance = self.instance_world(site, &app)?;
+            let component = instance.join(format!("{app}.wasm"));
+            let Ok(metadata) = std::fs::symlink_metadata(&component) else {
+                continue;
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let bytes = std::fs::read(&component)?;
+            let temporary = instance.join(format!(".{app}.wasm.tmp"));
+            std::fs::write(&temporary, bytes)?;
+            std::fs::rename(&temporary, &component)?;
+            if !updated.app_versions.contains_key(&app)
+                && let Ok(manifest) = self.app_manifest(&app)
+            {
+                updated.app_versions.insert(app.clone(), manifest.version);
+            }
+            copied += 1;
+        }
+        if copied > 0 {
+            self.update(&updated)?;
+        }
+        Ok(copied)
+    }
+
+    /// The version of `app` pinned in `site`, or `None` when it is not
+    /// installed (or predates the record).
+    ///
+    /// # Errors
+    ///
+    /// The site does not exist or its `site_config.json` cannot be read.
+    pub fn installed_app_version(&self, site: &str, app: &str) -> Result<Option<String>> {
+        Ok(self.get(site)?.app_versions.get(app).cloned())
     }
 
     /// The apps installed in `site`, in install order.
@@ -226,15 +321,26 @@ impl SiteManager {
         write_private_atomic(&path, &contents)
     }
 
-    /// Keep `site_config.json`'s `apps` in step with `apps.txt`, the file the
-    /// boot path reads.
-    fn sync_site_apps(&self, config: &SiteConfig, apps: Vec<String>) -> Result<()> {
-        if config.apps == apps {
+    /// Keep `site_config.json`'s `apps` and `app_versions` in step with
+    /// `apps.txt`, the file the boot path reads.
+    ///
+    /// One write for both: a failure must not leave a version recorded for an
+    /// app that is not in the list (or the reverse).
+    fn sync_site_state(
+        &self,
+        config: &SiteConfig,
+        apps: Vec<String>,
+        version: Option<(&str, String)>,
+    ) -> Result<()> {
+        let mut next = config.clone();
+        next.apps = apps;
+        if let Some((app, version)) = version {
+            next.app_versions.insert(app.to_string(), version);
+        }
+        if next.apps == config.apps && next.app_versions == config.app_versions {
             return Ok(());
         }
-        let mut config = config.clone();
-        config.apps = apps;
-        self.update(&config)?;
+        self.update(&next)?;
         Ok(())
     }
 }
@@ -279,19 +385,17 @@ fn copy_world_template(src: &Path, dst: &Path, keep_instance_data: bool) -> Resu
     Ok(())
 }
 
-/// Point `instance/<app>.wasm` at the global component, copying when the
-/// filesystem refuses a symlink.
-fn link_component(global: &Path, instance: &Path, app: &str) -> Result<()> {
-    let link = instance.join(format!("{app}.wasm"));
-    if std::fs::symlink_metadata(&link).is_ok() {
-        std::fs::remove_file(&link)?;
-    }
-    if let Ok(relative) = relative_path(instance, global)
-        && symlink_file(&relative, &link).is_ok()
-    {
-        return Ok(());
-    }
-    std::fs::copy(global, &link)?;
+/// Copy the global component into the instance, atomically.
+///
+/// A copy, not a symlink: the site pins the version it installed, and replacing
+/// `apps/<app>/<app>.wasm` must not change what a running (or restarting) site
+/// serves. The temp file is a sibling so the rename stays atomic on the same
+/// filesystem; a crash leaves the previous component intact.
+fn copy_component(global: &Path, instance: &Path, app: &str) -> Result<()> {
+    let destination = instance.join(format!("{app}.wasm"));
+    let temporary = instance.join(format!(".{app}.wasm.tmp"));
+    std::fs::copy(global, &temporary)?;
+    std::fs::rename(&temporary, &destination)?;
     Ok(())
 }
 
