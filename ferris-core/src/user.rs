@@ -90,7 +90,9 @@ impl User {
             locked_until: None,
             mfa_enabled: false,
             mfa_secret: None,
-            language: Some("en".to_string()),
+            // `None` means "follow the request/browser"; an explicit tag is a
+            // per-account choice and wins over `Accept-Language`.
+            language: None,
             timezone: Some("UTC".to_string()),
             created_at: now,
             updated_at: now,
@@ -130,7 +132,9 @@ impl User {
             locked_until: None,
             mfa_enabled: false,
             mfa_secret: None,
-            language: Some("en".to_string()),
+            // `None` means "follow the request/browser"; an explicit tag is a
+            // per-account choice and wins over `Accept-Language`.
+            language: None,
             timezone: Some("UTC".to_string()),
             created_at: now,
             updated_at: now,

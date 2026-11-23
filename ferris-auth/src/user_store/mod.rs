@@ -47,6 +47,8 @@ pub struct StoredUser {
     pub roles: Vec<String>,
     pub last_login: Option<String>,
     pub login_count: u32,
+    /// The account's chosen locale; `None` follows `Accept-Language`.
+    pub language: Option<String>,
 }
 
 impl StoredUser {
@@ -59,6 +61,7 @@ impl StoredUser {
             "full_name": self.full_name,
             "roles": self.roles,
             "user_type": self.user_type,
+            "language": self.language,
         }))
     }
 
@@ -77,6 +80,7 @@ impl StoredUser {
             user_type,
             enabled: self.enabled,
             roles: self.roles.clone(),
+            language: self.language.clone(),
             ..User::guest() // guest() seeds defaults for the remaining fields
         }
     }
@@ -134,6 +138,12 @@ fn document_to_stored(document: &Value) -> Result<StoredUser> {
             .and_then(Value::as_i64)
             .unwrap_or(0)
             .clamp(0, i64::from(u32::MAX)) as u32,
+        language: document
+            .get("language")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -362,6 +372,21 @@ impl UserStore {
         let ctx = system_context(&meta);
         self.engine.update(&ctx, id, Value::Object(fields)).await?;
         Ok(())
+    }
+
+    /// Persist the account's locale. `None` clears it, which makes the account
+    /// follow `Accept-Language` again.
+    ///
+    /// # Errors
+    ///
+    /// Storage errors from the engine.
+    pub async fn set_language(&self, id: &str, language: Option<&str>) -> Result<()> {
+        let mut fields = Map::new();
+        fields.insert(
+            "language".to_string(),
+            language.map_or(Value::Null, Value::from),
+        );
+        self.patch(id, fields).await
     }
 
     /// Update the last-login timestamp after a successful login.

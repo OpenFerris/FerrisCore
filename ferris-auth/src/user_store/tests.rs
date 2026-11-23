@@ -207,3 +207,49 @@ async fn to_user_maps_identity() {
     assert!(user.has_role("User"));
     assert!(user.enabled);
 }
+
+#[tokio::test]
+async fn the_account_language_round_trips_and_clears() {
+    let store = UserStore::new(db().await);
+    let user = store
+        .create(
+            "ada@example.com",
+            "Ada Lovelace",
+            Some("ada"),
+            crate::UserType::SystemUser,
+            "Secret123!",
+            &["System Manager".to_string()],
+        )
+        .await
+        .expect("the user is created");
+    assert_eq!(user.language, None, "a new account follows the browser");
+
+    store
+        .set_language(&user.id, Some("es"))
+        .await
+        .expect("the language is stored");
+    let stored = store
+        .find_by_id(&user.id)
+        .await
+        .expect("the user is readable")
+        .expect("the user exists");
+    assert_eq!(stored.language.as_deref(), Some("es"));
+    assert_eq!(
+        stored
+            .public_json()
+            .get("language")
+            .and_then(|v| v.as_str()),
+        Some("es")
+    );
+
+    store
+        .set_language(&user.id, None)
+        .await
+        .expect("the preference is cleared");
+    let cleared = store
+        .find_by_id(&user.id)
+        .await
+        .expect("the user is readable")
+        .expect("the user exists");
+    assert_eq!(cleared.language, None);
+}
