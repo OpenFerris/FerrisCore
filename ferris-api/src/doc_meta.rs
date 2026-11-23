@@ -14,9 +14,10 @@
 //! compiled into the registry. `effective_meta` keeps owning the merge, which is
 //! why a permission row and the Desk payload can never disagree.
 
+use ferris_core::i18n::{I18n, Locale, MetaTranslate};
 use ferris_core::{Result, Value};
 use ferris_db::Db;
-use ferris_schema::contract::{DynDocLink, DynMeta};
+use ferris_schema::contract::{DynDocLink, DynMeta, pretty_identifier};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -42,6 +43,77 @@ pub async fn effective_dyn_meta(pool: &Db, doctype: &str) -> Result<Option<DynMe
 }
 
 pub use ferris_schema::registry::{doc_actions, doc_links, permission_types};
+
+/// [`effective_dyn_meta`], with every label resolved for `locale`.
+///
+/// This is what the REST handler and the SSR bridge serve. The translation is a
+/// projection step, not part of the registry: the same DocType is rendered in
+/// different languages by different requests without rebuilding the schema.
+///
+/// # Errors
+///
+/// [`effective_dyn_meta`]'s failures.
+pub async fn effective_dyn_meta_localized(
+    pool: &Db,
+    doctype: &str,
+    i18n: &I18n,
+    locale: &Locale,
+) -> Result<Option<DynMeta>> {
+    let Some(mut payload) = effective_dyn_meta(pool, doctype).await? else {
+        return Ok(None);
+    };
+    localize_dyn_meta(&mut payload, i18n, locale);
+    Ok(Some(payload))
+}
+
+/// Replace the labels of `payload` with the catalogue's text when it has one.
+///
+/// Only display strings are touched: `name`, `fieldname`, `options`, view flags
+/// and every identifier the engine compares stay verbatim. A label without a
+/// catalogue entry (or without a conventional key) keeps the text it declared,
+/// so a partially translated catalogue degrades to the previous behaviour
+/// instead of to key text.
+pub fn localize_dyn_meta(payload: &mut DynMeta, i18n: &I18n, locale: &Locale) {
+    let t = MetaTranslate::new(i18n, locale);
+    let doctype = payload.name.as_str();
+
+    let label_fallback = payload
+        .label
+        .clone()
+        .unwrap_or_else(|| pretty_identifier(doctype));
+    payload.label = Some(t.doctype_label(doctype, &label_fallback).into_owned());
+
+    if let Some(description) = payload.description.take() {
+        payload.description = Some(t.doctype_description(doctype, &description).into_owned());
+    }
+
+    for field in &mut payload.fields {
+        let fieldname = field.fieldname.clone();
+        if let Some(label) = field.label.take() {
+            field.label = Some(t.field_label(doctype, &fieldname, &label).into_owned());
+        }
+        if let Some(placeholder) = field.placeholder.take() {
+            field.placeholder = Some(
+                t.field_placeholder(doctype, &fieldname, &placeholder)
+                    .into_owned(),
+            );
+        }
+        if let Some(description) = field.description.take() {
+            field.description = Some(
+                t.field_description(doctype, &fieldname, &description)
+                    .into_owned(),
+            );
+        }
+    }
+
+    // Action labels live in site data (`tabDocTypeAction`): an operator can put
+    // a key there, so they are translated only when the catalogue knows the
+    // string. Nothing about the action's route or type changes.
+    for action in &mut payload.actions {
+        let translated = t.literal(&action.label).into_owned();
+        action.label = translated;
+    }
+}
 
 /// Resolve every `DocType Link` of `doctype` against the document `name`.
 ///
@@ -222,6 +294,33 @@ pub async fn user_permissions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Metadata is projected in the caller's language, and only its display
+    /// strings move: the fieldname, the DocType name and every other identifier
+    /// stay byte-identical so links and permissions keep matching.
+    #[test]
+    fn metadata_labels_are_localized_without_touching_identifiers() {
+        let mut payload = DynMeta {
+            name: "User".to_string(),
+            module: "users".to_string(),
+            fields: vec![ferris_schema::contract::DynField {
+                fieldname: "full_name".to_string(),
+                label: Some("Full Name".to_string()),
+                fieldtype: "Data".to_string(),
+                ..ferris_schema::contract::DynField::default()
+            }],
+            ..DynMeta::default()
+        };
+        let spanish = Locale::parse("es").expect("es parses");
+        let i18n = I18n::new(spanish.clone(), Vec::new());
+
+        localize_dyn_meta(&mut payload, &i18n, &spanish);
+
+        assert_eq!(payload.label.as_deref(), Some("Usuario"));
+        assert_eq!(payload.name, "User");
+        assert_eq!(payload.fields[0].fieldname, "full_name");
+        assert_eq!(payload.fields[0].label.as_deref(), Some("Nombre completo"));
+    }
 
     fn admin() -> ferris_core::User {
         let mut user =

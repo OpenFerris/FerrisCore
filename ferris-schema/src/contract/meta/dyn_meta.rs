@@ -14,6 +14,10 @@ pub struct DynMeta {
     pub name: String,
     #[serde(default)]
     pub module: String,
+    /// The DocType's human label, already resolved for the request's locale by
+    /// the host. `None` only in payloads written before the field existed.
+    #[serde(default)]
+    pub label: Option<String>,
     pub title_field: Option<String>,
     pub search_fields: Vec<String>,
     pub date_field: Option<String>,
