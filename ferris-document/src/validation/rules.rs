@@ -5,19 +5,13 @@ pub(super) fn validate_link(
     value: &Value,
     field_meta: &ferris_schema::registry::FieldMeta,
 ) -> Result<()> {
-    // A link's *existence* is validated by the engine's Link checks; here we
-    // only reject an empty value on a field that names a target DocType, which
-    // no target table could ever contain.
-    if let Some(link_value) = value.as_str() {
-        if link_value.is_empty() && field_meta.options.is_some() {
-            return Err(ferris_core::Error::Validation(
-                ferris_core::ValidationError::Field {
-                    field: field_name.to_string(),
-                    message: "Link value cannot be empty".to_string(),
-                },
-            ));
-        }
-    }
+    // A link's *existence* is validated by the engine's Link checks. An empty
+    // value is allowed even when the field names a target DocType: optional
+    // links are routinely cleared (the Desk sends `""`, not `null`), and a
+    // generic push notification has no document behind it. Whether the field
+    // may be empty is `reqd`'s decision, not this rule's.
+    let _ = (field_name, value);
+    let _ = field_meta;
     Ok(())
 }
 

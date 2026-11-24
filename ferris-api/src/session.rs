@@ -376,8 +376,22 @@ pub async fn verify_mfa(
 /// sockets that were opened with it (RT-01).
 pub async fn logout(State(h): State<SessionHandlers>, headers: HeaderMap) -> Response {
     if let Some(sid) = session_cookie(&h.config, &headers) {
+        // Resolve the owner before deleting the row: after the delete there is
+        // nothing left to name in the `Activity Log`.
+        let owner = h
+            .session_manager
+            .get_session(&sid)
+            .await
+            .ok()
+            .flatten()
+            .map(|session| session.user_id);
         if let Err(e) = h.session_manager.delete_session(&sid).await {
             warn!(error = %e, "failed to delete session at logout");
+        } else if let Some(user) = owner {
+            ferris_core::audit::record(ferris_core::audit::AuditEvent::Logout {
+                user,
+                ip: client_ip(&headers),
+            });
         }
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -559,6 +573,13 @@ pub(crate) async fn start_session(
     // An empty address is "nothing was recorded"; a real address (the peer, or
     // the OAuth flow's literal `"unknown"`) is kept as it came.
     let ip = ip.filter(|ip| !ip.trim().is_empty());
+    // Every entry point (password, second factor, OAuth) lands here, so this is
+    // the one place the `Activity Log` row cannot be forgotten. The host's sink
+    // writes it asynchronously; no sink in a test is a no-op.
+    ferris_core::audit::record(ferris_core::audit::AuditEvent::Login {
+        user: user.id.clone(),
+        ip: ip.clone().unwrap_or_else(|| "unknown".to_string()),
+    });
     let full_name = user.full_name.clone();
     let user_id = user.id.clone();
     if crate::panel::notify_on_login(h.user_store.db(), &user_id).await {

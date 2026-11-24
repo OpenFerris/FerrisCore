@@ -14,6 +14,7 @@
 //! request path; the tenant registry caches parsed files by signature (mtime +
 //! length) so a host lookup does not re-read every file.
 
+pub mod audit;
 pub mod config;
 pub mod error;
 pub mod hooks;

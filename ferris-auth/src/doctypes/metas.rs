@@ -7,11 +7,9 @@
 use ferris_schema::DoctypeMeta;
 
 use super::{
-    access_log_meta, activity_log_meta, api_key_meta, docperm_meta, document_share_report_meta,
-    has_role_meta, module_profile_meta, permission_inspector_meta,
-    permitted_documents_for_user_meta, role_meta, role_permission_for_page_and_report_meta,
-    role_permission_manager_meta, role_profile_meta, session_meta, user_doctype_permissions_meta,
-    user_group_meta, user_invitation_meta, user_meta, user_permission_meta, user_type_meta,
+    access_log_meta, activity_log_meta, api_key_meta, docperm_meta, has_role_meta,
+    module_profile_meta, role_meta, role_profile_meta, session_meta, user_group_meta,
+    user_invitation_meta, user_meta, user_permission_meta, user_type_meta,
 };
 
 /// Every DocType this crate declares, in registration order.
@@ -32,17 +30,11 @@ pub fn doctype_metas() -> Vec<DoctypeMeta> {
         module_profile_meta(),
         user_type_meta(),
         // Permissions
-        role_permission_manager_meta(),
         user_permission_meta(),
-        role_permission_for_page_and_report_meta(),
-        permission_inspector_meta(),
         // Logs
         activity_log_meta(),
         access_log_meta(),
         // Reports
-        permitted_documents_for_user_meta(),
-        document_share_report_meta(),
-        user_doctype_permissions_meta(),
     ]
 }
 

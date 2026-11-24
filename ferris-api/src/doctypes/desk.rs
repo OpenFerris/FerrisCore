@@ -47,7 +47,9 @@ pub fn todo_meta() -> DoctypeMeta {
         .field(FieldMeta::date("date").label("Due Date"))
         .field(FieldMeta::link("allocated_to", "User").label("Allocated To"))
         .field(FieldMeta::link("reference_type", "DocType").label("Reference DocType"))
-        .field(FieldMeta::data("reference_name").label("Reference Document"))
+        .field(
+            FieldMeta::dynamic_link("reference_name", "reference_type").label("Reference Document"),
+        )
         .permission(system_manager())
 }
 
@@ -74,38 +76,6 @@ pub fn tag_meta() -> DoctypeMeta {
                 .label("Tag")
                 .required()
                 .unique()
-                .in_list_view(),
-        )
-        .permission(system_manager())
-}
-
-/// A one-shot bulk edit across documents of a DocType.
-#[must_use]
-pub fn bulk_update_meta() -> DoctypeMeta {
-    DoctypeMeta::new("Bulk Update", DESK_MODULE)
-        .description("A one-shot bulk edit across documents of a DocType.")
-        .title_field("document_type")
-        .sort("modified", "desc")
-        .allow_delete()
-        .field(FieldMeta::section_break("section_details").label("Details"))
-        .field(
-            FieldMeta::link("document_type", "DocType")
-                .label("Document Type")
-                .required()
-                .in_list_view(),
-        )
-        .field(
-            FieldMeta::data("field")
-                .label("Field")
-                .required()
-                .in_list_view(),
-        )
-        .field(FieldMeta::data("value").label("Value"))
-        .field(FieldMeta::code("condition").label("Condition"))
-        .field(
-            FieldMeta::select("status", "Pending\nCompleted\nFailed")
-                .label("Status")
-                .default_value("Pending")
                 .in_list_view(),
         )
         .permission(system_manager())
@@ -138,7 +108,7 @@ pub fn notification_log_meta() -> DoctypeMeta {
                 .in_list_view(),
         )
         .field(FieldMeta::link("document_type", "DocType").label("Document Type"))
-        .field(FieldMeta::data("document_name").label("Document Name"))
+        .field(FieldMeta::dynamic_link("document_name", "document_type").label("Document Name"))
         .field(FieldMeta::check("read").label("Read").default_value("0"))
         .permission(system_manager())
 }

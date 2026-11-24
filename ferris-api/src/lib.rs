@@ -74,7 +74,7 @@ pub use panel::{
 };
 pub use router::{ApiState, api_router_with_app_state, api_router_with_modules};
 pub use rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, dispatch, dispatch_batch};
-pub use seed::{SeedReport, seed_singletons};
+pub use seed::{ReferenceSeedReport, SeedReport, seed_reference_data, seed_singletons};
 pub use session::{
     SessionHandlers, login, logout, logout_all, session as session_me, set_language, verify_mfa,
 };

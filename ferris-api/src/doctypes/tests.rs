@@ -51,8 +51,6 @@ fn register_is_idempotent() {
     assert!(get_doctype(NOTIFICATION).is_some());
     assert!(get_doctype(EVENT).is_some());
     assert!(get_doctype(NOTIFICATION_SETTINGS).is_some());
-    assert!(get_doctype("Data Import").is_some());
-    assert!(get_doctype("Prepared Report").is_some());
 }
 
 /// R-FW-1b: the desired-state DocType is a hidden machine surface whose

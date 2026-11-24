@@ -14,7 +14,7 @@ pub fn user_invitation_meta() -> DoctypeMeta {
         .allow_delete()
         .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
-            FieldMeta::data("email")
+            FieldMeta::email("email")
                 .label("Email")
                 .required()
                 .in_list_view(),

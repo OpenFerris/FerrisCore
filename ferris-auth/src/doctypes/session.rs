@@ -22,7 +22,7 @@ pub fn session_meta() -> DoctypeMeta {
         .hidden()
         .field(FieldMeta::section_break("section_details").label("Details"))
         .field(
-            FieldMeta::data("user_id")
+            FieldMeta::link("user_id", "User")
                 .label("User")
                 .required()
                 .in_list_view(),

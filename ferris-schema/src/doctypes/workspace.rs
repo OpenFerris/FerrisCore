@@ -74,7 +74,7 @@ fn workspace_fields() -> Vec<FieldMeta> {
         // registration. The value is a plain icon name, hence `Data`.
         FieldMeta::data("icon").label("Icon"),
         FieldMeta::data("title").label("Title").required().in_list_view(),
-        FieldMeta::float("sequence_id").label("Sequence Id"),
+        FieldMeta::int("sequence_id").label("Sequence Id"),
         FieldMeta::data("for_user").label("For User"),
         FieldMeta::link("parent_page", "Workspace").label("Parent Page"),
         FieldMeta::link("module", "Module Def")

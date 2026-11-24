@@ -81,7 +81,6 @@ pub fn build_workspace() -> WorkspaceSpec {
                 Item::doctype("ToDo"),
                 Item::doctype("Event"),
                 Item::doctype("Tag"),
-                Item::doctype("Bulk Update"),
                 Item::doctype("Notification Log"),
             ],
         )
@@ -160,10 +159,9 @@ mod tests {
         let mut got = linked(&build);
         got.sort_unstable();
         // The schema-owned Build DocTypes plus the Desk helpers `ferris-api`
-        // owns (`ToDo`, `Event`, `Tag`, `Bulk Update`, `Notification Log`,
+        // owns (`ToDo`, `Event`, `Tag`, `Notification Log`,
         // `Notification Settings`) — the Build sidebar mirrors §6.1.
         let mut expected = vec![
-            "Bulk Update",
             "Calendar View",
             "Client Script",
             "Custom DocPerm",

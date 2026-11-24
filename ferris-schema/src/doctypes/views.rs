@@ -400,7 +400,7 @@ pub fn page_meta() -> DoctypeMeta {
         )
         .field(FieldMeta::data("title").label("Title").in_list_view())
         .field(FieldMeta::data("icon").label("Icon"))
-        .field(FieldMeta::data("module").label("Module"))
+        .field(FieldMeta::link("module", "Module Def").label("Module"))
         .field(FieldMeta::check("standard").label("Standard"))
         .permission(system_manager())
 }

@@ -1,6 +1,7 @@
 use ferris_core::{Result, Value};
 use ferris_db::Db;
-use ferris_document::DocumentEngine;
+use ferris_document::{DocumentEngine, EngineContext};
+use ferris_schema::DoctypeMeta;
 
 use super::meta::context;
 use super::{DocStore, effective_meta, validate_doctype};
@@ -46,16 +47,7 @@ impl DocStore {
     pub async fn get_single_system(pool: &Db, doctype: &str) -> Result<Value> {
         validate_doctype(doctype)?;
         let meta = effective_meta(pool, doctype).await?;
-        let mut ctx = context(doctype, "", meta.as_ref());
-        // Run as the framework's system principal, not as an anonymous bypass:
-        // DOC-01 makes `get_single` deny an unbound context, and a Single's
-        // install-wide settings are still a privileged read, not a public one.
-        let mut system =
-            ferris_core::User::system_user("system@ferris.local".to_string(), "System".to_string());
-        system.id = "system@ferris.local".to_string();
-        system.roles = vec!["System Manager".to_string()];
-        ctx.user = Some(system);
-        ctx.allow_anonymous = false;
+        let ctx = system_context(doctype, meta.as_ref());
         DocumentEngine::new(pool.clone()).get_single(&ctx).await
     }
 
@@ -99,5 +91,58 @@ impl DocStore {
         DocumentEngine::new(pool.clone())
             .save_single(&context(doctype, "", meta.as_ref()), data)
             .await
+    }
+}
+
+/// The framework's own system identity for boot-time writes.
+///
+/// The seed runs before any session exists, and the rows it writes are
+/// install-wide reference data (`Module Def`, `Language`), not caller-owned
+/// documents. Running as the system principal keeps the engine default-deny
+/// while still allowing the write, exactly like `get_single_system`.
+fn system_context<'a>(doctype: &str, meta: Option<&'a DoctypeMeta>) -> EngineContext<'a> {
+    let mut ctx = context(doctype, "", meta);
+    let mut system =
+        ferris_core::User::system_user("system@ferris.local".to_string(), "System".to_string());
+    system.id = "system@ferris.local".to_string();
+    system.roles = vec!["System Manager".to_string()];
+    ctx.user = Some(system);
+    ctx.allow_anonymous = false;
+    ctx
+}
+
+impl DocStore {
+    /// Insert a boot-time reference row with an explicit name.
+    ///
+    /// Only for framework seeds (`Module Def`, `Language`): the name is the
+    /// identifier other records link to, so it cannot be minted.
+    ///
+    /// # Errors
+    ///
+    /// Validation, permission or storage errors from the engine.
+    pub async fn create_system(pool: &Db, doctype: &str, value: Value) -> Result<Value> {
+        validate_doctype(doctype)?;
+        let meta = effective_meta(pool, doctype).await?;
+        let ctx = system_context(doctype, meta.as_ref());
+        DocumentEngine::new(pool.clone()).create(&ctx, value).await
+    }
+
+    /// Whether a boot-time reference row already exists.
+    ///
+    /// # Errors
+    ///
+    /// Validation errors for an unknown `doctype` and storage errors other than
+    /// "not found".
+    pub async fn exists_system(pool: &Db, doctype: &str, name: &str) -> Result<bool> {
+        validate_doctype(doctype)?;
+        let meta = effective_meta(pool, doctype).await?;
+        let ctx = system_context(doctype, meta.as_ref());
+        match DocumentEngine::new(pool.clone()).get(&ctx, name).await {
+            Ok(_) => Ok(true),
+            Err(ferris_core::Error::Document(ferris_core::DocumentError::NotFound { .. })) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 }

@@ -5,6 +5,10 @@ fn test_is_valid_email() {
     assert!(is_valid_email("test@example.com"));
     assert!(!is_valid_email("invalid"));
     assert!(!is_valid_email("@example.com"));
+    // Private installs use dotless domains; the rest of the shape is checked.
+    assert!(is_valid_email("admin@local"));
+    assert!(!is_valid_email("a@.local"));
+    assert!(!is_valid_email("a@local."));
 }
 
 #[test]
