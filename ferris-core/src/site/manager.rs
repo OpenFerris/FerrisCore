@@ -56,6 +56,10 @@ pub const ASSETS_DIR: &str = "assets";
 /// instance, where the host merges it into the site's catalogue set at boot.
 pub const LOCALES_DIR: &str = "locales";
 
+/// A site's private root: files, the SQLite database and anything the site must
+/// not publish. `0700`.
+pub const PRIVATE_DIR: &str = "private";
+
 /// Files neither the site nor its plugins may publish.
 const PRIVATE_FILES: &str = "private/files";
 
@@ -131,6 +135,29 @@ impl SiteManager {
         site_segment(&self.sites_root, site)
     }
 
+    /// `sites/<site>/private`, the site's own (unpublished) root.
+    ///
+    /// # Errors
+    ///
+    /// An invalid site name.
+    pub fn private_dir(&self, site: &str) -> Result<PathBuf> {
+        Ok(self.site_dir(site)?.join(PRIVATE_DIR))
+    }
+
+    /// Create `sites/<site>/private` (idempotent, `0700`) and return it.
+    ///
+    /// `site new` needs it before the SQLite file is opened, and the resolver
+    /// uses it to adopt a database left at the bench root by an older layout.
+    ///
+    /// # Errors
+    ///
+    /// An invalid site name or an I/O failure.
+    pub fn ensure_private_dir(&self, site: &str) -> Result<PathBuf> {
+        let dir = self.private_dir(site)?;
+        create_private_dir(&dir)?;
+        Ok(dir)
+    }
+
     /// `sites/<site>/plugins`, the instance scope.
     ///
     /// # Errors
@@ -166,6 +193,20 @@ impl SiteManager {
     /// [`Error::Validation`] when the app name is not a safe path segment.
     pub fn global_app_dir(&self, app: &str) -> Result<PathBuf> {
         plugin_segment(&self.apps_root, app)
+    }
+
+    /// Create the bench's fixed directories and the shared site defaults.
+    ///
+    /// Idempotent: `ferris init` may run over a folder that already has part of
+    /// the layout, and creating the first site calls the same helpers.
+    ///
+    /// # Errors
+    ///
+    /// An I/O failure under `apps/` or `sites/`.
+    pub fn init_bench(&self) -> Result<()> {
+        create_private_dir(&self.apps_root)?;
+        create_private_dir(&self.sites_root)?;
+        self.ensure_common_config()
     }
 
     /// Every loadable site, sorted by name.
