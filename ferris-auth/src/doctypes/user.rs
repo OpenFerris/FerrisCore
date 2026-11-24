@@ -15,7 +15,7 @@ pub fn user_meta() -> DoctypeMeta {
         .field(FieldMeta::tab_break("tab_profile").label("Profile"))
         .field(FieldMeta::section_break("section_identity").label("Identity"))
         .field(
-            FieldMeta::data("email")
+            FieldMeta::email("email")
                 .label("Email")
                 .required()
                 .in_list_view(),

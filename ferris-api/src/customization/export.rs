@@ -137,10 +137,21 @@ fn restrict_to_scope(payload: &mut WorldCustomization, scope: &ExportScope) -> R
                 .customization
                 .fields
                 .retain(|field| fieldnames.contains(&field.fieldname));
-            payload.customization.properties.clear();
-            if payload.customization.fields.is_empty() {
+            // A standard field has no `Custom Field` row: exporting one of its
+            // properties is exactly the setter half of the scope. Dropping the
+            // setters made the per-field export fail for every compiled field
+            // and silently lose the edits of a custom one.
+            payload.customization.properties.retain(|setter| {
+                setter
+                    .fieldname
+                    .as_deref()
+                    .is_some_and(|fieldname| fieldnames.contains(&fieldname.to_string()))
+            });
+            if payload.customization.fields.is_empty()
+                && payload.customization.properties.is_empty()
+            {
                 return Err(Error::Validation(ValidationError::Invalid(format!(
-                    "the export scope names no custom field of `{doctype}`"
+                    "the export scope names no customization of `{doctype}`"
                 ))));
             }
         }

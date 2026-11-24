@@ -76,8 +76,65 @@ pub(super) fn apply_field_property(field: &mut FieldMeta, property: &str, value:
         "in_list_view" => field.in_list_view = parse_bool(value),
         "in_standard_filter" => field.in_standard_filter = parse_bool(value),
         "unique" => field.unique = parse_bool(value),
+        // ── Formatting and validation ───────────────────────────────────
+        "precision" => field.precision = parse_u8(value).map(|n| n.min(10)),
+        "max_length" => field.max_length = parse_u32(value),
+        "min_value" => field.min_value = none_when_empty(value),
+        "max_value" => field.max_value = none_when_empty(value),
+        "non_negative" => field.non_negative = parse_bool(value),
+        "width" => field.width = none_when_empty(value),
+        "print_width" => field.print_width = none_when_empty(value),
+        "length" => field.length = parse_u32(value),
+        "fetch_from" => field.fetch_from = none_when_empty(value),
+        "fetch_if_empty" => field.fetch_if_empty = parse_bool(value),
+        // ── Behaviour the Desk and the engine read ─────────────────────
+        "bold" => field.bold = parse_bool(value),
+        "allow_on_submit" => field.allow_on_submit = parse_bool(value),
+        "read_only_on_load" => field.read_only_on_load = parse_bool(value),
+        "no_copy" => field.no_copy = parse_bool(value),
+        "search_index" => field.search_index = parse_bool(value),
+        "sort_options" => field.sort_options = parse_bool(value),
+        "in_global_search" => field.in_global_search = parse_bool(value),
+        "in_preview" => field.in_preview = parse_bool(value),
+        "in_filter" => field.in_filter = parse_bool(value),
+        "print_hide" => field.print_hide = parse_bool(value),
+        "report_hide" => field.report_hide = parse_bool(value),
+        "ignore_user_permissions" => field.ignore_user_permissions = parse_bool(value),
+        "ignore_xss_filter" => field.ignore_xss_filter = parse_bool(value),
+        "ignore_xss_filter_field" => field.ignore_xss_filter_field = parse_bool(value),
+        "convert_to_user_timezone" => field.convert_to_user_timezone = parse_bool(value),
+        "remember_last_selected_value" => field.remember_last_selected_value = parse_bool(value),
+        "hide_border" => field.hide_border = parse_bool(value),
+        "collapsible" => field.collapsible = parse_bool(value),
+        "collapsible_depends_on" => field.collapsible_depends_on = none_when_empty(value),
+        "mandatory_depends_on" => field.mandatory_depends_on = none_when_empty(value),
+        "read_only_depends_on" => field.read_only_depends_on = none_when_empty(value),
+        // ── Layout and access ───────────────────────────────────────────
+        // `columns` is the span of the field inside its section (1..=4 in the
+        // Desk's grid); a value outside the rendered range is clamped rather
+        // than stored and ignored.
+        "columns" => {
+            field.columns = parse_u8(value)
+                .map(|n| n.clamp(1, 4))
+                .unwrap_or(field.columns)
+        }
+        // `permlevel` is how the engine hides a field from a caller; `mask`
+        // redacts its value. The API additionally requires System Manager to
+        // write either one.
+        "permlevel" => {
+            field.permlevel = parse_u8(value).map(|n| n.min(9)).unwrap_or(field.permlevel)
+        }
+        "mask" => field.mask = parse_bool(value),
         _ => {}
     }
+}
+
+fn parse_u8(value: &str) -> Option<u8> {
+    value.trim().parse::<u8>().ok()
+}
+
+fn parse_u32(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok()
 }
 
 pub(super) fn apply_doctype_property(meta: &mut DoctypeMeta, property: &str, value: &str) {
@@ -201,5 +258,37 @@ mod tests {
         let mut meta = field("Password");
         apply_field_property(&mut meta, "fieldtype", "Secret");
         assert_eq!(meta.fieldtype, "Secret");
+    }
+
+    /// The advanced properties the inspector exposes reach the field, and a
+    /// value outside the rendered range is clamped instead of stored and
+    /// ignored.
+    #[test]
+    fn advanced_properties_are_applied_and_bounded() {
+        let mut meta = field("Float");
+        apply_field_property(&mut meta, "precision", "3");
+        apply_field_property(&mut meta, "max_length", "120");
+        apply_field_property(&mut meta, "bold", "1");
+        apply_field_property(&mut meta, "allow_on_submit", "1");
+        apply_field_property(&mut meta, "fetch_from", "customer.tax_id");
+        apply_field_property(&mut meta, "columns", "9");
+        apply_field_property(&mut meta, "permlevel", "42");
+        apply_field_property(
+            &mut meta,
+            "mandatory_depends_on",
+            "eval:doc.status == 'open'",
+        );
+
+        assert_eq!(meta.precision, Some(3));
+        assert_eq!(meta.max_length, Some(120));
+        assert!(meta.bold);
+        assert!(meta.allow_on_submit);
+        assert_eq!(meta.fetch_from.as_deref(), Some("customer.tax_id"));
+        assert_eq!(meta.columns, 4, "the Desk grid has four columns");
+        assert_eq!(meta.permlevel, 9, "the engine has ten permission levels");
+        assert_eq!(
+            meta.mandatory_depends_on.as_deref(),
+            Some("eval:doc.status == 'open'")
+        );
     }
 }

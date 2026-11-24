@@ -8,10 +8,9 @@ use ferris_schema::{DoctypeMeta, register_doctype};
 
 use super::dashboards::{dashboard_layout_meta, dashboard_settings_meta};
 use super::data::{
-    data_export_meta, data_import_log_meta, data_import_meta, document_naming_rule_condition_meta,
-    document_naming_rule_meta, document_naming_settings_meta, prepared_report_meta,
+    document_naming_rule_condition_meta, document_naming_rule_meta, document_naming_settings_meta,
 };
-use super::desk::{bulk_update_meta, notification_log_meta, tag_meta, todo_meta};
+use super::desk::{notification_log_meta, tag_meta, todo_meta};
 use super::system::{
     desired_state_meta, desk_layout_meta, event_meta, notification_meta, notification_settings_meta,
 };
@@ -38,16 +37,11 @@ pub fn framework_doctype_metas() -> Vec<DoctypeMeta> {
 pub fn data_doctype_metas() -> Vec<DoctypeMeta> {
     vec![
         // Data
-        data_import_meta(),
-        data_export_meta(),
         document_naming_rule_meta(),
         document_naming_settings_meta(),
-        data_import_log_meta(),
-        prepared_report_meta(),
         // Desk (the feed helpers)
         todo_meta(),
         tag_meta(),
-        bulk_update_meta(),
         notification_log_meta(),
     ]
 }

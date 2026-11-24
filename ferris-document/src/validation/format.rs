@@ -9,7 +9,11 @@ pub fn is_valid_email(email: &str) -> bool {
     if local.is_empty() || local.len() > 64 || domain.is_empty() {
         return false;
     }
-    if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
+    // A dotless domain (`admin@localhost`, `ops@intranet`) is allowed on
+    // purpose: Ferris ships to private installs, and the fixtures of the whole
+    // workspace use `@local`. The structural checks below still reject the
+    // malformed shapes.
+    if domain.starts_with('.') || domain.ends_with('.') {
         return false;
     }
     if domain.contains("..") {

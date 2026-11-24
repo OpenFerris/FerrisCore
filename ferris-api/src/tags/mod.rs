@@ -74,7 +74,7 @@ pub fn tag_link_meta() -> DoctypeMeta {
                 .in_list_view(),
         )
         .field(
-            FieldMeta::data("document_name")
+            FieldMeta::dynamic_link("document_name", "document_type")
                 .label("Document Name")
                 .required()
                 .in_list_view(),

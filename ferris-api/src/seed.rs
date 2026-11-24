@@ -51,6 +51,91 @@ pub async fn seed_singletons(pool: &Db) -> SeedReport {
     report
 }
 
+/// What [`seed_reference_data`] did.
+#[derive(Debug, Default, Clone)]
+pub struct ReferenceSeedReport {
+    /// `Module Def` rows created on this boot.
+    pub modules: usize,
+    /// `Language` rows created on this boot.
+    pub languages: usize,
+    /// `doctype: error` lines. A seed must not stop the boot.
+    pub warnings: Vec<String>,
+}
+
+/// Seed the reference tables the Desk links to: one `Module Def` per module a
+/// registered DocType declares, and one `Language` per advertised locale.
+///
+/// Both are `Link` targets (`Workspace.module`, `System Settings.language`,
+/// `User.language`), so an empty table rendered every one of those pickers
+/// blank and left each seeded `Workspace` pointing at a missing row. Idempotent:
+/// an existing row is only checked, never overwritten — an operator may rename
+/// a module or language and the seed must not undo it.
+pub async fn seed_reference_data(pool: &Db, languages: &[String]) -> ReferenceSeedReport {
+    let mut report = ReferenceSeedReport::default();
+
+    let mut modules: Vec<String> = ferris_schema::list_doctypes_metas()
+        .iter()
+        .map(|meta| meta.module.clone())
+        .filter(|module| !module.trim().is_empty())
+        .collect();
+    modules.sort_unstable();
+    modules.dedup();
+
+    for module in modules {
+        match DocStore::exists_system(pool, "Module Def", &module).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let row = serde_json::json!({
+                    "name": module,
+                    "module_name": module,
+                    "app_name": "",
+                    "module_type": "Modules",
+                });
+                match DocStore::create_system(pool, "Module Def", row.into()).await {
+                    Ok(_) => report.modules += 1,
+                    Err(error) => report
+                        .warnings
+                        .push(format!("Module Def `{module}`: {error}")),
+                }
+            }
+            Err(error) => report
+                .warnings
+                .push(format!("Module Def `{module}`: {error}")),
+        }
+    }
+
+    for tag in languages {
+        match DocStore::exists_system(pool, "Language", tag).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let row = serde_json::json!({
+                    "name": tag,
+                    "language_name": language_label(tag),
+                    "code": tag,
+                });
+                match DocStore::create_system(pool, "Language", row.into()).await {
+                    Ok(_) => report.languages += 1,
+                    Err(error) => report.warnings.push(format!("Language `{tag}`: {error}")),
+                }
+            }
+            Err(error) => report.warnings.push(format!("Language `{tag}`: {error}")),
+        }
+    }
+
+    report
+}
+
+/// The native name of the locales the binary ships; an unknown tag is its own
+/// label, which is still readable in a picker.
+fn language_label(tag: &str) -> String {
+    match tag {
+        "en" => "English".to_string(),
+        "es" => "Español".to_string(),
+        "pt" => "Português".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +146,34 @@ mod tests {
             ferris_auth::User::system_user("admin@local".to_string(), "Admin".to_string());
         user.roles = vec!["System Manager".to_string()];
         user
+    }
+
+    /// The reference seed creates one row per module and locale, with the name
+    /// a `Link` stores, and never duplicates on a second boot.
+    #[tokio::test]
+    async fn reference_rows_are_seeded_once_with_their_link_names() {
+        ferris_schema::doctypes::register_doctypes();
+        let pool = ferris_db::memory_db().await.unwrap();
+
+        let first = seed_reference_data(&pool, &["en".to_string(), "es".to_string()]).await;
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+        assert!(first.modules > 0, "the registry declares modules");
+        assert_eq!(first.languages, 2);
+
+        let second = seed_reference_data(&pool, &["en".to_string(), "es".to_string()]).await;
+        assert_eq!(second.modules, 0, "a second boot creates nothing");
+        assert_eq!(second.languages, 0);
+
+        assert!(
+            DocStore::exists_system(&pool, "Language", "en")
+                .await
+                .unwrap()
+        );
+        assert!(
+            DocStore::exists_system(&pool, "Module Def", "Build")
+                .await
+                .unwrap()
+        );
     }
 
     /// Seeding materialises a Single's row with its declared defaults, so host

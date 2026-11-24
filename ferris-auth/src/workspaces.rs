@@ -37,26 +37,10 @@ pub fn users_workspace() -> WorkspaceSpec {
                 Item::doctype("User Type"),
             ],
         )
-        .group(
-            "Permissions",
-            vec![
-                Item::doctype("Role Permission Manager"),
-                Item::doctype("User Permission"),
-                Item::doctype("Role Permission for Page and Report"),
-                Item::doctype("Permission Inspector"),
-            ],
-        )
+        .group("Permissions", vec![Item::doctype("User Permission")])
         .group(
             "Logs",
             vec![Item::doctype("Activity Log"), Item::doctype("Access Log")],
-        )
-        .group(
-            "Reports",
-            vec![
-                Item::doctype("Permitted Documents For User"),
-                Item::doctype("Document Share Report"),
-                Item::doctype("User Doctype Permissions"),
-            ],
         )
 }
 

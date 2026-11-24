@@ -245,10 +245,21 @@ pub async fn remove_custom_field(
 ) -> Result<()> {
     crate::store::validate_doctype(doctype)?;
     ensure_can_customize(user, doctype)?;
-    store_with(pool)
-        .await?
-        .delete_custom_field(doctype, fieldname)
-        .await
+    let store = store_with(pool).await?;
+    // The field row and its setters are separate tables. Deleting only the row
+    // left the setters behind: they would reappear if a field with the same
+    // name was created again, and they leaked into a whole-DocType export.
+    let existing = read_customization(pool, user, doctype).await?;
+    for setter in existing
+        .properties
+        .iter()
+        .filter(|setter| setter.fieldname.as_deref() == Some(fieldname))
+    {
+        store
+            .delete_property_setter(doctype, Some(fieldname), &setter.property)
+            .await?;
+    }
+    store.delete_custom_field(doctype, fieldname).await
 }
 
 /// Add or replace a property setter, returning the stored spec.
@@ -266,6 +277,36 @@ pub async fn save_property_setter(
     crate::store::validate_doctype(doctype)?;
     ensure_can_customize(user, doctype)?;
     ensure_fieldtype_change(user, doctype, spec)?;
+    // `permlevel` hides a field from callers and `mask` redacts its value: a
+    // site manager may edit the form, but not the access policy.
+    if matches!(spec.property.as_str(), "permlevel" | "mask") && !user.has_role(SYSTEM_MANAGER_ROLE)
+    {
+        return Err(Error::Authz(AuthzError::PermissionDenied {
+            action: format!("set `{}`", spec.property),
+            resource: format!("doctype `{doctype}`"),
+        }));
+    }
+    // A position that names no field is accepted by the store and ignored by
+    // the merge; rejecting it here turns a silent no-op into an answer.
+    if spec.property == "insert_after"
+        && let (Some(fieldname), anchor) = (spec.fieldname.as_deref(), spec.value.trim())
+        && !anchor.is_empty()
+        && anchor != "__first__"
+        && anchor != fieldname
+    {
+        let meta = crate::store::effective_meta(pool, doctype)
+            .await?
+            .ok_or_else(|| {
+                Error::Schema(ferris_core::SchemaError::DocTypeNotFound(
+                    doctype.to_string(),
+                ))
+            })?;
+        if !meta.fields.iter().any(|field| field.fieldname == anchor) {
+            return Err(Error::Validation(ValidationError::Invalid(format!(
+                "insert_after: `{anchor}` is not a field of `{doctype}`"
+            ))));
+        }
+    }
     store_with(pool)
         .await?
         .set_property(PropertySetter {

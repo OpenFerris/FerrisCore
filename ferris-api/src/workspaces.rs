@@ -29,21 +29,12 @@ pub fn data_workspace() -> WorkspaceSpec {
         .module(crate::doctypes::DATA_MODULE)
         .icon("Database")
         .folder(FERRIS_FOLDER)
-        .item(Item::doctype("Data Import"))
-        .item(Item::doctype("Data Export"))
         .item(Item::doctype("File"))
         .group(
             "Naming",
             vec![
                 Item::doctype("Document Naming Rule"),
                 Item::doctype("Document Naming Settings"),
-            ],
-        )
-        .group(
-            "Logs",
-            vec![
-                Item::doctype("Data Import Log"),
-                Item::doctype("Prepared Report"),
             ],
         )
 }
@@ -81,15 +72,7 @@ mod tests {
         for item in &ws.items {
             item.collect_doctypes(&mut linked);
         }
-        let mut expected = vec![
-            "Data Export",
-            "Data Import",
-            "Data Import Log",
-            "Document Naming Rule",
-            "Document Naming Settings",
-            "File",
-            "Prepared Report",
-        ];
+        let mut expected = vec!["Document Naming Rule", "Document Naming Settings", "File"];
         linked.sort_unstable();
         expected.sort_unstable();
         assert_eq!(linked, expected);
