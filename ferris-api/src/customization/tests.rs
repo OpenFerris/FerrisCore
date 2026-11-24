@@ -313,7 +313,10 @@ async fn a_fields_scope_exports_only_the_listed_custom_fields() {
     assert_eq!(exported.doctype, "Scoped Field Probe");
     assert_eq!(exported.customization.fields.len(), 1);
     assert_eq!(exported.customization.fields[0].fieldname, "alpha");
-    assert!(exported.customization.properties.is_empty());
+    // The field scope carries the field's setters too: a standard field has no
+    // `Custom Field` row and its properties are exactly what the export is for.
+    assert_eq!(exported.customization.properties.len(), 1);
+    assert_eq!(exported.customization.properties[0].property, "placeholder");
 
     let _ = std::fs::remove_dir_all(&root);
 }
