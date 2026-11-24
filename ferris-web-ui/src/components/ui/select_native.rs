@@ -15,6 +15,9 @@ pub fn SelectNative(
     #[prop(optional)] on_change: Option<leptos::prelude::Callback<leptos::ev::Event>>,
     #[prop(optional, into)] aria_invalid: Option<Signal<bool>>,
     #[prop(into, optional)] aria_describedby: Option<String>,
+    /// Whether the field is required; native `required` plus `aria-required`.
+    #[prop(optional)]
+    required: bool,
 ) -> impl IntoView {
     clx! {
         SelectNativeRoot, select,
@@ -33,6 +36,8 @@ pub fn SelectNative(
                         .unwrap_or_else(|| "false".to_string())
                 }
                 attr:aria-describedby=aria_describedby
+                attr:aria-required=required
+                attr:required=required
                 class=class
                 prop:value=move || value.get()
                 on:change=move |ev| {

@@ -17,6 +17,16 @@ pub fn Checkbox(
     /// Id of a visible element that names the control (a `<label>` or text).
     #[prop(into, optional)]
     aria_labelledby: String,
+    /// Reactive invalid state, so the form's error reaches the actual control
+    /// (a `role="checkbox"` button, which a `<label>` cannot describe).
+    #[prop(optional, into)]
+    aria_invalid: Option<Signal<bool>>,
+    /// Id of the element that explains the control (its error/description).
+    #[prop(into, optional)]
+    aria_describedby: Option<String>,
+    /// Whether the field is required; exposed as `aria-required`.
+    #[prop(optional)]
+    aria_required: bool,
 ) -> impl IntoView {
     // The rendered control is a `<button role="checkbox">`, so a `<label for>`
     // cannot attach to it; the id is what lets a caller point a label (or its
@@ -52,6 +62,9 @@ pub fn Checkbox(
             aria-checked=move || checked.get().to_string()
             aria-label=aria_label
             aria-labelledby=labelledby
+            aria-invalid=move || aria_invalid.map(|invalid| invalid.get().to_string())
+            aria-describedby=aria_describedby
+            aria-required=aria_required
             disabled=move || disabled.get()
             on:click=move |_| {
                 if !disabled.get() && let Some(callback) = on_checked_change {

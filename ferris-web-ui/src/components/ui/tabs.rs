@@ -8,6 +8,8 @@ use tw_merge::tw_merge;
 #[derive(Clone)]
 struct TabsCtx {
     selected: RwSignal<String>,
+    /// Prefix of the `tab`/`panel` element ids. Unique per tab group on the page.
+    base: String,
 }
 
 #[derive(Clone, Copy)]
@@ -41,11 +43,21 @@ pub enum TabsOrientation {
 pub fn Tabs(
     #[prop(into, optional)] class: String,
     #[prop(into, optional)] default_value: String,
+    /// Prefix for the tab/panel ids. Two groups on one page must pass different
+    /// values; the WAI-ARIA `aria-controls`/`aria-labelledby` pair needs
+    /// document-unique ids to point at the right panel.
+    #[prop(into, optional)]
+    id: String,
     #[prop(default = TabsOrientation::Horizontal)] orientation: TabsOrientation,
     children: Children,
 ) -> impl IntoView {
     let selected = RwSignal::new(default_value);
-    provide_context(TabsCtx { selected });
+    let base = if id.is_empty() {
+        "tabs".to_string()
+    } else {
+        id
+    };
+    provide_context(TabsCtx { selected, base });
 
     let is_horizontal = orientation == TabsOrientation::Horizontal;
     let class = tw_merge!(
@@ -115,6 +127,9 @@ pub fn TabsTrigger(
     let variant = expect_context::<TabsListCtx>().variant;
     let is_line = variant == TabsVariant::Line;
 
+    let slug = tab_slug(&value);
+    let trigger_id = format!("{}-tab-{slug}", ctx.base);
+    let panel_id = format!("{}-panel-{slug}", ctx.base);
     let val = value.clone();
     let is_active = Memo::new(move |_| ctx.selected.get() == val);
 
@@ -136,7 +151,10 @@ pub fn TabsTrigger(
         <button
             type="button"
             role="tab"
+            id=trigger_id
+            aria-controls=panel_id
             aria-selected=move || is_active.get().to_string()
+            tabindex=move || if is_active.get() { "0" } else { "-1" }
             class=move || {
                 let active = is_active.get();
                 tw_merge!(
@@ -150,8 +168,20 @@ pub fn TabsTrigger(
                 )
             }
             data-name="TabsTrigger"
+            data-value=value.clone()
             data-state=move || if is_active.get() { "Active" } else { "Inactive" }
             on:click=move |_| ctx.selected.set(value.clone())
+            on:keydown={
+                // WAI-ARIA tab keyboard model: arrows move between tabs,
+                // Home/End jump to the first/last.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let ctx = ctx.clone();
+                    move |ev: leptos::ev::KeyboardEvent| move_tab_focus(&ev, &ctx)
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                move |_ev: leptos::ev::KeyboardEvent| {}
+            }
         >
             {children()}
         </button>
@@ -165,6 +195,9 @@ pub fn TabsContent(
     children: Children,
 ) -> impl IntoView {
     let ctx = expect_context::<TabsCtx>();
+    let slug = tab_slug(&value);
+    let panel_id = format!("{}-panel-{slug}", ctx.base);
+    let trigger_id = format!("{}-tab-{slug}", ctx.base);
     let val = value;
     let is_active = Memo::new(move |_| ctx.selected.get() == val);
 
@@ -172,6 +205,9 @@ pub fn TabsContent(
         <div
             data-name="TabsContent"
             role="tabpanel"
+            id=panel_id
+            aria-labelledby=trigger_id
+            tabindex="0"
             class=move || {
                 tw_merge!(
                     "flex-1 text-sm outline-none",
@@ -184,5 +220,84 @@ pub fn TabsContent(
         >
             {children()}
         </div>
+    }
+}
+
+/// A DOM-id-safe slug of a tab value: `sales orders` → `sales-orders`.
+#[must_use]
+pub fn tab_slug(value: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// Move focus/selection between the sibling tabs of `ev`'s tablist.
+#[cfg(target_arch = "wasm32")]
+fn move_tab_focus(ev: &leptos::ev::KeyboardEvent, ctx: &TabsCtx) {
+    use wasm_bindgen::JsCast;
+
+    let Some(target) = ev
+        .current_target()
+        .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    let Some(list) = target.parent_element() else {
+        return;
+    };
+    let Ok(tabs) = list.query_selector_all("[role='tab']") else {
+        return;
+    };
+    let count = tabs.length();
+    if count == 0 {
+        return;
+    }
+
+    let index = (0..count).find(|index| {
+        tabs.item(*index)
+            .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            .is_some_and(|element| element == target)
+    });
+    let Some(index) = index else {
+        return;
+    };
+
+    let next = match ev.key().as_str() {
+        "ArrowRight" | "ArrowDown" => (index + 1) % count,
+        "ArrowLeft" | "ArrowUp" => (index + count - 1) % count,
+        "Home" => 0,
+        "End" => count - 1,
+        _ => return,
+    };
+    ev.prevent_default();
+
+    let Some(element) = tabs
+        .item(next)
+        .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    if let Some(value) = element.get_attribute("data-value") {
+        ctx.selected.set(value);
+    }
+    let _ = element.focus();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_slug;
+
+    #[test]
+    fn a_tab_value_becomes_a_dom_safe_slug() {
+        assert_eq!(tab_slug("General"), "general");
+        assert_eq!(tab_slug("Sales Orders"), "sales-orders");
+        assert_eq!(tab_slug("  "), "");
+        assert_eq!(tab_slug("a.b/c"), "a-b-c");
     }
 }
