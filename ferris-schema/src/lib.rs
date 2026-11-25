@@ -28,11 +28,15 @@ pub mod custom_docperm;
 #[cfg(feature = "native")]
 pub mod customization;
 #[cfg(feature = "native")]
+pub mod doctype_columns;
+#[cfg(feature = "native")]
 pub mod doctypes;
 #[cfg(feature = "native")]
 pub mod migration;
 #[cfg(feature = "native")]
 pub mod registry;
+#[cfg(feature = "native")]
+pub mod search;
 #[cfg(feature = "native")]
 pub mod workspaces;
 
@@ -42,6 +46,10 @@ pub use builders::RolePermission;
 pub use custom_docperm::{has_custom_permission, has_custom_permission_on};
 #[cfg(feature = "native")]
 pub use customization::{CustomField, CustomizationStore, PropertySetter};
+#[cfg(feature = "native")]
+pub use doctype_columns::{
+    alter_add_columns, child_table_columns, create_doc_type_statements, field_column,
+};
 #[cfg(feature = "native")]
 pub use migration::MigrationRunner;
 #[cfg(feature = "native")]

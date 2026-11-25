@@ -6,3 +6,4 @@ mod features;
 mod harness;
 mod module;
 mod role_permissions;
+mod session;

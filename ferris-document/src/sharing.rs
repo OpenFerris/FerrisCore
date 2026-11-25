@@ -341,10 +341,17 @@ impl ShareManager {
         user: &str,
     ) -> Result<std::collections::HashSet<String>> {
         let shares = if let Some(db) = &self.db {
+            // Narrow to the rows that can matter before decoding them: this user's
+            // own shares plus the ones granted to everyone. A site can hold many
+            // shares for a DocType, and the list path should not decode all of
+            // them on every page.
             let rows = db
                 .fetch_all(&Stmt::new(
-                    format!("SELECT * FROM {TAB_SHARE} WHERE doctype = ?"),
-                    vec![Value::from(doctype)],
+                    format!(
+                        "SELECT * FROM {TAB_SHARE} \
+                         WHERE doctype = ? AND (shared_with = ? OR everyone <> 0)"
+                    ),
+                    vec![Value::from(doctype), Value::from(user)],
                 ))
                 .await?;
             rows.iter().map(row_to_share).collect::<Vec<_>>()

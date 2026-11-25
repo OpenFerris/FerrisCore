@@ -34,15 +34,83 @@ mod list;
 mod naming;
 mod permissions;
 mod runtime;
+mod search;
 mod single;
 mod trash;
+mod typed;
 
 async fn engine() -> DocumentEngine {
+    register_common_doctypes();
     let db = ferris_db::memory_db().await.unwrap();
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
     DocumentEngine::new(db)
+}
+
+/// Register the ad-hoc DocTypes the engine tests drive.
+///
+/// Columns are the only source of truth (ADR 0001), so an unregistered name
+/// cannot store a declared field. These names are test fixtures, not part of
+/// `ferris-schema`'s catalogue; registering them once per process gives them
+/// the columns their bodies use. Idempotent.
+pub(crate) fn register_common_doctypes() {
+    let simple = |name: &str, fields: &[&str]| DoctypeMeta {
+        name: name.to_string(),
+        fields: fields
+            .iter()
+            .map(|field| field_meta(field, "Data", 0))
+            .collect(),
+        ..Default::default()
+    };
+    ferris_schema::register_doctype(DoctypeMeta {
+        name: "ToDo".to_string(),
+        is_submittable: true,
+        fields: vec![
+            field_meta("title", "Data", 0),
+            field_meta("status", "Data", 0),
+            field_meta("description", "Text", 0),
+            field_meta("edited", "Data", 0),
+            field_meta("first", "Data", 0),
+            field_meta("last", "Data", 0),
+            field_meta("urgent", "Check", 0),
+            field_meta("code", "Data", 0),
+            field_meta("changed", "Data", 0),
+            field_meta("loot", "Data", 0),
+            field_meta("hijacked", "Data", 0),
+            field_meta("note", "Data", 0),
+            ferris_schema::FieldMeta {
+                fieldname: "paid_amount".to_string(),
+                fieldtype: "Currency".to_string(),
+                allow_on_submit: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    for (name, fields) in [
+        ("Note", &["title", "body"][..]),
+        ("NestedSealProbe", &["title", "sealed"][..]),
+        ("Shared", &["title"][..]),
+        ("ListShared", &["title"][..]),
+        ("History", &["title"][..]),
+        ("Versioned", &["title"][..]),
+        ("Masked", &["title", "secret", "password"][..]),
+        ("AuthorizeFirstProbe", &["title"][..]),
+        ("AuthorizeFirstUpdateProbe", &["title"][..]),
+        ("SuppressProbe", &["title"][..]),
+    ] {
+        ferris_schema::register_doctype(simple(name, fields));
+    }
+}
+
+fn field_meta(fieldname: &str, fieldtype: &str, permlevel: u8) -> ferris_schema::FieldMeta {
+    ferris_schema::FieldMeta {
+        fieldname: fieldname.to_string(),
+        fieldtype: fieldtype.to_string(),
+        permlevel,
+        ..Default::default()
+    }
 }
 
 fn sysadmin() -> ferris_core::User {
@@ -124,5 +192,53 @@ fn secret_meta() -> DoctypeMeta {
             field("admin_secret", "Secret", 1),
         ],
         ..Default::default()
+    }
+}
+
+/// A process-wide `User Permission` source for tests.
+///
+/// The source is global and the tests that swap it must not run in parallel, so
+/// the guard both installs the rules and holds the serialisation lock until it
+/// is dropped. `read` and `permissions` share it, which is why it lives here
+/// rather than inside one test module.
+pub(crate) mod user_permission_source {
+    use ferris_core::permissions::{
+        UserPermissionRule, UserPermissionRules, UserPermissionSource,
+        clear_user_permission_source, set_user_permission_source,
+    };
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    struct Static(Vec<UserPermissionRule>);
+
+    impl UserPermissionSource for Static {
+        fn rules_for(&self, user: &str) -> UserPermissionRules {
+            UserPermissionRules::from(
+                self.0
+                    .iter()
+                    .filter(|rule| rule.user == user)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        }
+    }
+
+    static SERIALISE: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct Installed {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            clear_user_permission_source();
+        }
+    }
+
+    pub(crate) fn install(rules: Vec<UserPermissionRule>) -> Installed {
+        let guard = SERIALISE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_user_permission_source(Arc::new(Static(rules)));
+        Installed { _guard: guard }
     }
 }

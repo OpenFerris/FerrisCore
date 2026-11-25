@@ -80,7 +80,7 @@ impl TenantConfig {
 ///
 /// The documented deployment model is **one instance (one database, one
 /// files root) per tenant**: requests are never routed to a tenant by their
-/// `Host`, and the JWT `tenant` claim is not consulted. `ferris serve --tenant`
+/// `Host`, and a session claim is not consulted for tenancy. `ferris serve --tenant`
 /// rewrites the process settings from a [`TenantConfig`] before the listener
 /// starts, so `host` resolution here is a refusal list — a request addressed
 /// to a name this instance does not serve is misdirected, not a tenant switch.

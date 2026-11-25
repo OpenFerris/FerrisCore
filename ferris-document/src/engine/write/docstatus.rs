@@ -12,22 +12,26 @@ impl DocumentEngine {
     /// DOC4: this used to read the row through `self.read_row` (one pool
     /// connection) and write it back through `persist_data` (a *different* one)
     /// with no transaction, so a concurrent write landing between the two was
-    /// silently lost — the stale read overwrote the whole authoritative `data`
-    /// blob. It also skipped the `modified`/`modified_by` stamp `update_via`
-    /// applies on every save (Frappe's `set_user_and_timestamp`). The
-    /// read-modify-write now happens in one transaction, on that transaction's
-    /// connection, with the timestamp stamped like any other save.
+    /// silently lost — the stale read overwrote the whole row. It also skipped
+    /// the `modified`/`modified_by` stamp `update_via` applies on every save
+    /// (Frappe's `set_user_and_timestamp`). The read-modify-write now happens in
+    /// one transaction, on that transaction's connection, with the timestamp
+    /// stamped like any other save.
     pub async fn set_docstatus(
         &self,
         ctx: &EngineContext<'_>,
         name: &str,
         target: DocStatus,
     ) -> Result<Value> {
-        let table = self.ensure_table(&ctx.doctype).await?;
+        let table = self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
         self.ensure_runtime_tables().await?;
+        // Before the transaction: the row read, the child rewrite and the
+        // projection of the row all use this one shape, and no metadata query
+        // may need a second connection while this one is checked out.
+        let shape = DocShape::resolve(&self.db, &ctx.doctype, self.db.dialect(), ctx.meta).await?;
         let mut tx = self.db.begin().await?;
         match self
-            .set_docstatus_in_tx(&mut tx, ctx, &table, name, target)
+            .set_docstatus_in_tx(&mut tx, ctx, &table, name, target, &shape)
             .await
         {
             Ok(document) => {
@@ -50,9 +54,19 @@ impl DocumentEngine {
         table: &str,
         name: &str,
         target: DocStatus,
+        shape: &DocShape,
     ) -> Result<Value> {
+        let effective;
+        let ctx = match shape.meta.as_ref() {
+            Some(meta) => {
+                effective = effective_context(ctx, meta);
+                &effective
+            }
+            None => ctx,
+        };
         let (current, owner_column) =
-            read_row_via(&mut WriteSink::Tx(&mut *tx), &ctx.doctype, name).await?;
+            read_row_with_shape_via(&mut WriteSink::Tx(&mut *tx), shape, &ctx.doctype, name)
+                .await?;
         let current_status = current
             .get("docstatus")
             .and_then(|v| v.as_str())
@@ -106,7 +120,16 @@ impl DocumentEngine {
                 map.insert("modified_by".to_string(), Value::from(user.id.clone()));
             }
         }
-        persist_written(&mut WriteSink::Tx(&mut *tx), table, name, &document).await?;
+        persist_written(
+            &mut WriteSink::Tx(&mut *tx),
+            table,
+            &ctx.doctype,
+            name,
+            &document,
+            shape,
+            search::ready_for(&self.db, &ctx.doctype),
+        )
+        .await?;
         let change_type = match target {
             DocStatus::Submitted => crate::versioning::ChangeType::Submit,
             DocStatus::Cancelled => crate::versioning::ChangeType::Cancel,

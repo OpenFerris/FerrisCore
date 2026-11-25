@@ -11,8 +11,16 @@
 //! is the single source of truth. The store acts as `System Manager` (see
 //! `store_support.rs`): it is a trusted framework caller running before
 //! any user is authenticated, and it has to read the stored secret hash to
-//! verify a presented secret. `secret_hash` is a `Password` field, so the engine
-//! hashes the plaintext on write and only System Manager reads the hash back.
+//! verify a presented secret.
+//!
+//! The secret is stored as `sha256:<64 lowercase hex>` over the presented
+//! string, never in clear. A 32-byte random token needs no password KDF — the
+//! entropy is already there, and Argon2 on every API request was measurable
+//! latency (AUTH12). `secret_hash` is a plain `Data` field at `permlevel` 1:
+//! the manager hashes and writes it itself, so the engine must **not** run it
+//! through the process-wide password hasher. Rows written before this format
+//! carry a `$argon2...` PHC hash; [`ApiKeyManager::verify`] still accepts them
+//! and rewrites the row with the digest on the first successful use.
 //!
 //! Without a database the manager keeps records in memory, which is what the
 //! unit tests and a pool-less boot use.
@@ -26,15 +34,24 @@ use parking_lot::RwLock;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use uuid::Uuid;
 
+use crate::crypto::{constant_time_eq, sha256_hex};
 use crate::store_support::system_context;
 
-/// The DocType the manager persists.
+/// The DocType the manager persists (`API Key`).
 const DOCTYPE: &str = "API Key";
 
+/// Prefix of the stored digest: `sha256:<64 lowercase hex characters>`.
+const DIGEST_PREFIX: &str = "sha256:";
+
+/// Prefix of a legacy Argon2 PHC hash, written when `secret_hash` was a
+/// `Password` field.
+const LEGACY_ARGON2_PREFIX: &str = "$argon2";
+
 /// An issued API key (the secret itself is never stored).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiKey {
     pub id: String,
     pub user: String,
@@ -49,11 +66,77 @@ pub struct ApiKey {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// Redacts the stored digest. `ApiKey` derives `Serialize` (with
+/// `secret_hash` skipped) precisely so it can travel to a caller; letting the
+/// derived `Debug` print the hash would put the same credential in every log
+/// line and error message.
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiKey")
+            .field("id", &self.id)
+            .field("user", &self.user)
+            .field("key", &self.key)
+            .field("secret_hash", &"<redacted>")
+            .field("enabled", &self.enabled)
+            .field("description", &self.description)
+            .field("created_at", &self.created_at)
+            .field("last_used_at", &self.last_used_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 impl ApiKey {
     /// Whether the key is enabled and not expired at `now`.
     pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
         self.enabled && self.expires_at.map_or(true, |expires| expires > now)
     }
+}
+
+/// The stored form of `secret`.
+fn hash_secret_for_storage(secret: &str) -> String {
+    format!("{DIGEST_PREFIX}{}", sha256_hex(secret.as_bytes()))
+}
+
+/// The outcome of comparing a presented secret with the stored value.
+enum SecretCheck {
+    /// The secret matched. `upgrade` is set when the row still holds a legacy
+    /// Argon2 hash and should be rewritten with the digest.
+    Match { upgrade: bool },
+    /// The secret did not match, or the stored value is malformed. Both fail
+    /// closed; the caller must not distinguish them.
+    NoMatch,
+}
+
+/// Compare `presented` with a stored `secret_hash`.
+///
+/// Fails closed: an unparseable or unknown stored value is a mismatch, never an
+/// error and never a panic. The digest comparison is constant time.
+fn check_secret(presented: &str, stored: &str) -> SecretCheck {
+    if let Some(stored_hex) = stored.strip_prefix(DIGEST_PREFIX) {
+        let well_formed =
+            stored_hex.len() == 64 && stored_hex.bytes().all(|b| b.is_ascii_hexdigit());
+        if !well_formed {
+            return SecretCheck::NoMatch;
+        }
+        let computed = sha256_hex(presented.as_bytes());
+        return if constant_time_eq(computed.as_bytes(), stored_hex.as_bytes()) {
+            SecretCheck::Match { upgrade: false }
+        } else {
+            SecretCheck::NoMatch
+        };
+    }
+
+    // Rows created before the SHA-256 format hold an Argon2 PHC hash. A parse
+    // or hashing error here is a malformed stored value: refuse, do not error.
+    if stored.starts_with(LEGACY_ARGON2_PREFIX) {
+        return match crate::password::verify_password_default(presented, stored) {
+            Ok(true) => SecretCheck::Match { upgrade: true },
+            Ok(false) | Err(_) => SecretCheck::NoMatch,
+        };
+    }
+
+    SecretCheck::NoMatch
 }
 
 fn random_token(bytes: usize) -> String {
@@ -73,14 +156,19 @@ fn parse_datetime(value: Option<&Value>) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// `ApiKey` → engine document. `secret` is what lands in `secret_hash`: the
-/// plaintext on create (the engine hashes it) or an already-stored hash.
-fn to_document(record: &ApiKey, secret: &str) -> Value {
+/// `ApiKey` → engine document.
+///
+/// `secret_hash` already holds the stored digest; the manager writes it and
+/// the `Data` fieldtype leaves it untouched on the way to the column.
+fn to_document(record: &ApiKey) -> Value {
     let mut map = Map::new();
     map.insert("name".to_string(), Value::from(record.id.as_str()));
     map.insert("user".to_string(), Value::from(record.user.as_str()));
     map.insert("key".to_string(), Value::from(record.key.as_str()));
-    map.insert("secret_hash".to_string(), Value::from(secret));
+    map.insert(
+        "secret_hash".to_string(),
+        Value::from(record.secret_hash.as_str()),
+    );
     map.insert("enabled".to_string(), Value::from(record.enabled));
     map.insert(
         "description".to_string(),
@@ -149,20 +237,38 @@ pub const LAST_USED_RESOLUTION_SECS: i64 = 5 * 60;
 pub struct ApiKeyManager {
     engine: Option<DocumentEngine>,
     memory: RwLock<Vec<ApiKey>>,
+    /// Per-key failed-verification budget. An attacker who knows a public key
+    /// can otherwise grind the secret indefinitely; the budget lives on the
+    /// manager because the key id is only known after the lookup.
+    failures: crate::middleware::RateLimiter,
 }
 
 impl ApiKeyManager {
     pub fn new() -> Self {
-        Self {
-            engine: None,
-            memory: RwLock::new(Vec::new()),
-        }
+        Self::with_verification_limit(10, 15 * 60)
     }
 
     pub fn with_db(db: Db) -> Self {
+        Self::with_db_and_limit(db, 10, 15 * 60)
+    }
+
+    /// Build an in-memory manager with an explicit failure budget.
+    #[must_use]
+    pub fn with_verification_limit(max_attempts: u32, window_seconds: u64) -> Self {
+        Self {
+            engine: None,
+            memory: RwLock::new(Vec::new()),
+            failures: crate::middleware::RateLimiter::new(max_attempts, window_seconds),
+        }
+    }
+
+    /// Build a database-backed manager with an explicit failure budget.
+    #[must_use]
+    pub fn with_db_and_limit(db: Db, max_attempts: u32, window_seconds: u64) -> Self {
         Self {
             engine: Some(DocumentEngine::new(db)),
             memory: RwLock::new(Vec::new()),
+            failures: crate::middleware::RateLimiter::new(max_attempts, window_seconds),
         }
     }
 
@@ -175,10 +281,8 @@ impl ApiKeyManager {
         let Some(engine) = &self.engine else {
             return Ok(());
         };
-        // `secret_hash` is a `Password` field: the engine hashes it through the
-        // process-wide hook, which `ferris-auth` installs. Make sure it is in
-        // place even when the caller has not run the full boot sequence.
-        ferris_core::password::set_password_hasher(crate::password::hash_password_default);
+        // `secret_hash` is written by the manager as a plain `Data` value, so
+        // no password hasher has to be installed for this DocType.
         ferris_schema::register_doctype(crate::doctypes::api_key_meta());
         engine.ensure_table(DOCTYPE).await.map(|_| ())
     }
@@ -187,8 +291,7 @@ impl ApiKeyManager {
     ///
     /// # Errors
     ///
-    /// Returns [`ValidationError::Invalid`] without a user, a hashing error
-    /// from the engine without a database, or a storage error with one.
+    /// Returns [`ValidationError::Invalid`] without a user, or a storage error.
     pub async fn create(
         &self,
         user: &str,
@@ -205,7 +308,7 @@ impl ApiKeyManager {
             id: Uuid::new_v4().to_string(),
             user: user.to_string(),
             key: random_token(16),
-            secret_hash: String::new(),
+            secret_hash: hash_secret_for_storage(&secret),
             enabled: true,
             description,
             created_at: Utc::now(),
@@ -214,21 +317,22 @@ impl ApiKeyManager {
         };
 
         let Some(engine) = &self.engine else {
-            let mut stored = record.clone();
-            stored.secret_hash = crate::password::hash_password_default(&secret)?;
-            self.memory.write().push(stored.clone());
-            return Ok((stored, secret));
+            self.memory.write().push(record.clone());
+            return Ok((record, secret));
         };
 
-        // The engine hashes the plaintext `Password` field on write; the record
-        // it returns carries the stored hash.
         let meta = crate::doctypes::api_key_meta();
         let ctx = system_context(&meta);
-        let created = engine.create(&ctx, to_document(&record, &secret)).await?;
+        let created = engine.create(&ctx, to_document(&record)).await?;
         Ok((from_document(&created)?, secret))
     }
 
     /// Verify a `key`/`secret` pair.
+    ///
+    /// The stored digest is compared in constant time. A legacy `$argon2...`
+    /// hash is accepted once and the row is rewritten with the digest, so the
+    /// expensive path disappears as each key is used. A malformed or unknown
+    /// stored value is a mismatch (fail closed), not an error.
     ///
     /// `last_used_at` is refreshed on success, but **at most once per**
     /// [`LAST_USED_RESOLUTION_SECS`]: an API key is checked on every request, and
@@ -239,7 +343,7 @@ impl ApiKeyManager {
     ///
     /// # Errors
     ///
-    /// Hashing or storage errors.
+    /// Storage errors.
     pub async fn verify(&self, key: &str, secret: &str) -> Result<Option<ApiKey>> {
         let Some(mut record) = self.find_by_key(key).await? else {
             return Ok(None);
@@ -247,10 +351,22 @@ impl ApiKeyManager {
         if !record.is_valid_at(Utc::now()) {
             return Ok(None);
         }
-        let valid = crate::password::verify_password_default(secret, &record.secret_hash)?;
-        if !valid {
+        if self.failures.is_blocked(&record.id) {
             return Ok(None);
         }
+        match check_secret(secret, &record.secret_hash) {
+            SecretCheck::Match { upgrade: false } => {}
+            SecretCheck::Match { upgrade: true } => {
+                let digest = hash_secret_for_storage(secret);
+                self.store_secret_hash(&record.id, &digest).await?;
+                record.secret_hash = digest;
+            }
+            SecretCheck::NoMatch => {
+                self.failures.record_failure(&record.id);
+                return Ok(None);
+            }
+        }
+        self.failures.record_success(&record.id);
 
         let now = Utc::now();
         let stale = record
@@ -278,6 +394,20 @@ impl ApiKeyManager {
             }
         }
         Ok(Some(record))
+    }
+
+    /// Replace the stored digest of `id` (the legacy-upgrade write).
+    async fn store_secret_hash(&self, id: &str, digest: &str) -> Result<()> {
+        if let Some(engine) = &self.engine {
+            let meta = crate::doctypes::api_key_meta();
+            let ctx = system_context(&meta);
+            let mut body = Map::new();
+            body.insert("secret_hash".to_string(), Value::from(digest));
+            engine.update(&ctx, id, Value::Object(body)).await?;
+        } else if let Some(existing) = self.memory.write().iter_mut().find(|k| k.id == id) {
+            existing.secret_hash = digest.to_string();
+        }
+        Ok(())
     }
 
     /// Verify a `key:secret` credential string (Frappe `token` scheme).
@@ -372,133 +502,4 @@ impl Default for ApiKeyManager {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn db() -> Db {
-        ferris_db::memory_db().await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn test_api_key_lifecycle() {
-        let manager = ApiKeyManager::with_db(db().await);
-        manager.init().await.unwrap();
-
-        let (record, secret) = manager
-            .create("user@example.com", Some("integration".to_string()), None)
-            .await
-            .unwrap();
-        assert!(!secret.is_empty());
-        assert!(!record.key.is_empty());
-
-        // Correct credentials, both directly and via the Frappe `token` scheme.
-        assert!(
-            manager
-                .verify(&record.key, &secret)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            manager
-                .authenticate(&format!("{}:{}", record.key, secret))
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        // Wrong secret / unknown key.
-        assert!(manager.verify(&record.key, "nope").await.unwrap().is_none());
-        assert!(manager.verify("unknown", &secret).await.unwrap().is_none());
-
-        // Listing hides nothing but the secret hash is skipped on serialize.
-        let listed = manager.list("user@example.com").await.unwrap();
-        assert_eq!(listed.len(), 1);
-        let json = serde_json::to_string(&listed[0]).unwrap();
-        assert!(!json.contains(&secret));
-
-        // Revoked keys no longer verify.
-        manager.revoke(&record.id).await.unwrap();
-        assert!(
-            manager
-                .verify(&record.key, &secret)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    /// A use inside the window must not write: the hot path stays a read, and
-    /// the timestamp returned is the stored one (not a fresher value the row
-    /// does not have).
-    #[tokio::test]
-    async fn last_used_at_is_not_rewritten_on_every_request() {
-        let manager = ApiKeyManager::new();
-        let (record, secret) = manager
-            .create("user@example.com", None, None)
-            .await
-            .unwrap();
-
-        let first = manager.verify(&record.key, &secret).await.unwrap().unwrap();
-        let first_used = first.last_used_at.expect("the first use stamps the key");
-        let second = manager.verify(&record.key, &secret).await.unwrap().unwrap();
-        assert_eq!(
-            second.last_used_at,
-            Some(first_used),
-            "a second use inside the resolution window must not move the stamp"
-        );
-    }
-
-    /// Once the stamp is stale the next successful use refreshes it.
-    #[tokio::test]
-    async fn a_stale_last_used_at_is_refreshed() {
-        let manager = ApiKeyManager::new();
-        let (record, secret) = manager
-            .create("user@example.com", None, None)
-            .await
-            .unwrap();
-        let stale = Utc::now() - chrono::Duration::seconds(LAST_USED_RESOLUTION_SECS + 1);
-        manager
-            .memory
-            .write()
-            .iter_mut()
-            .find(|key| key.id == record.id)
-            .expect("the created key")
-            .last_used_at = Some(stale);
-
-        let verified = manager.verify(&record.key, &secret).await.unwrap().unwrap();
-        let refreshed = verified.last_used_at.expect("refreshed");
-        assert!(
-            refreshed > stale,
-            "a stale stamp must be refreshed: {stale} -> {refreshed}"
-        );
-        let stored = manager
-            .list("user@example.com")
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|key| key.id == record.id)
-            .expect("stored key");
-        assert_eq!(stored.last_used_at, Some(refreshed));
-    }
-
-    #[tokio::test]
-    async fn test_expired_key_is_invalid() {
-        let manager = ApiKeyManager::new();
-        let (record, secret) = manager
-            .create(
-                "user@example.com",
-                None,
-                Some(Utc::now() - chrono::Duration::seconds(1)),
-            )
-            .await
-            .unwrap();
-        assert!(
-            manager
-                .verify(&record.key, &secret)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-}
+mod tests;

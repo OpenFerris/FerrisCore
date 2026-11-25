@@ -11,8 +11,8 @@
 //! depending on `sqlx`. The escape hatches are the exception, and are
 //! deliberate: a caller that has to hand the pool to a driver `ferris-db` does
 //! not wrap needs [`Db::pool`] / [`Db::into_pool`], and the row decoder needs
-//! the raw row [`Row::new`] accepts. Those three signatures do name `AnyPool`
-//! and `AnyRow`, and that is the whole set.
+//! the concrete row [`Row::new`] accepts. Those three signatures name
+//! [`DbPool`] and [`crate::row::DbRow`], and that is the whole set.
 
 mod tx;
 
@@ -22,18 +22,16 @@ mod tests;
 pub use tx::Tx;
 
 use crate::dialect::Dialect;
-use crate::error;
-use crate::row::Row;
+use crate::driver::{self, DbPool, PinnedConnection};
+use crate::row::{DbRow, Row};
 use crate::sql::Upsert;
 use ferris_core::{Error, Result, Value};
-use sqlx::{
-    Any, AnyPool, Column, Row as SqlxRow,
-    any::{AnyArguments, AnyPoolOptions, AnyRow},
-    query::Query,
-};
+use sqlx::{Decode, MySql, Postgres, Sqlite, Type};
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A statement bound for execution.
+#[derive(Clone)]
 pub struct Stmt {
     sql: String,
     params: Vec<Value>,
@@ -80,12 +78,22 @@ impl Stmt {
         &self.params
     }
 
-    fn query(&self) -> Query<'_, Any, AnyArguments<'_>> {
-        let mut query = sqlx::query(&self.sql);
-        for value in &self.params {
-            query = bind_value(query, value);
+    /// A statement whose `?` holes are spelled for `dialect`.
+    ///
+    /// Postgres takes `$1`, `$2`, …; the rendering allocates only for it. A
+    /// statement with no parameters is borrowed untouched, because a `?` there
+    /// is a literal rather than a hole.
+    pub(crate) fn for_dialect(&self, dialect: Dialect) -> Cow<'_, Stmt> {
+        if self.params.is_empty() {
+            return Cow::Borrowed(self);
         }
-        query
+        match dialect.render_placeholders(&self.sql) {
+            Cow::Borrowed(_) => Cow::Borrowed(self),
+            Cow::Owned(sql) => Cow::Owned(Self {
+                sql,
+                params: self.params.clone(),
+            }),
+        }
     }
 }
 
@@ -93,33 +101,6 @@ impl From<Upsert> for Stmt {
     fn from(upsert: Upsert) -> Self {
         let (sql, params) = upsert.into_parts();
         Self { sql, params }
-    }
-}
-
-/// Bind a framework [`Value`] as a query parameter.
-///
-/// `Any` is type-erased, so a value is bound at the closest concrete type the
-/// JSON shape allows; anything richer is sent as JSON text, which is how the
-/// document blob is stored.
-fn bind_value<'q>(
-    query: Query<'q, Any, AnyArguments<'q>>,
-    value: &Value,
-) -> Query<'q, Any, AnyArguments<'q>> {
-    match value {
-        Value::Null => query.bind(Option::<String>::None),
-        Value::Bool(b) => query.bind(*b),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                query.bind(i)
-            } else if let Some(f) = n.as_f64() {
-                query.bind(f)
-            } else {
-                query.bind(n.to_string())
-            }
-        }
-        Value::String(s) => query.bind(s.clone()),
-        // `Any` cannot carry a JSON value, so it is stored as text.
-        Value::Array(_) | Value::Object(_) => query.bind(value.to_json().to_string()),
     }
 }
 
@@ -141,7 +122,7 @@ impl Affected {
 /// A connection pool plus the dialect it speaks.
 #[derive(Clone)]
 pub struct Db {
-    pool: AnyPool,
+    pool: DbPool,
     dialect: Dialect,
     /// Process-unique identity, shared by every clone of this handle.
     ///
@@ -170,7 +151,7 @@ impl Db {
     /// The dialect cannot be read back off a built pool, so it comes from the
     /// configuration that produced it. Guessing from a URL the pool no longer
     /// exposes would silently emit SQL for the wrong backend.
-    pub fn new(pool: AnyPool, config: &ferris_core::DatabaseConfig) -> Self {
+    pub fn new(pool: DbPool, config: &ferris_core::DatabaseConfig) -> Self {
         let dialect = Dialect::from_database_type(config.r#type);
         Self {
             pool,
@@ -180,7 +161,7 @@ impl Db {
     }
 
     /// Wrap a pool with an explicitly known dialect.
-    pub fn with_dialect(pool: AnyPool, dialect: Dialect) -> Self {
+    pub fn with_dialect(pool: DbPool, dialect: Dialect) -> Self {
         Self {
             pool,
             dialect,
@@ -216,13 +197,13 @@ impl Db {
     ///
     /// Prefer the methods on this type: reaching past it is how SQL escaped
     /// the abstraction in the first place.
-    pub fn pool(&self) -> &AnyPool {
+    pub fn pool(&self) -> &DbPool {
         &self.pool
     }
 
     /// Take the underlying pool, for code that has to pass it to a driver
     /// ferris-db does not wrap.
-    pub fn into_pool(self) -> AnyPool {
+    pub fn into_pool(self) -> DbPool {
         self.pool
     }
 
@@ -231,19 +212,34 @@ impl Db {
     /// The migration runner needs this: a session-scoped advisory lock is only
     /// meaningful if the lock, the migrations and the release all run on the
     /// *same* session, and every method above takes whatever connection the
-    /// pool hands out. Holding a `PoolConnection` pins one session for as long
-    /// as the guard lives.
-    pub(crate) async fn acquire(&self) -> Result<sqlx::pool::PoolConnection<Any>> {
-        self.pool.acquire().await.map_err(error::map)
+    /// pool hands out. Holding a [`PinnedConnection`] pins one session for as
+    /// long as the guard lives.
+    pub(crate) async fn acquire(&self) -> Result<PinnedConnection> {
+        self.pool.acquire().await
     }
 
     /// Run a statement, returning how many rows it changed.
     pub async fn execute(&self, stmt: &Stmt) -> Result<Affected> {
-        stmt.query()
-            .execute(&self.pool)
-            .await
-            .map(|r| Affected(r.rows_affected()))
-            .map_err(error::map)
+        let stmt = stmt.for_dialect(self.dialect);
+        match &self.pool {
+            DbPool::Sqlite(pool) => driver::execute::<Sqlite, _>(pool, stmt.as_ref()).await,
+            DbPool::Postgres(pool) => driver::execute::<Postgres, _>(pool, stmt.as_ref()).await,
+            DbPool::MySql(pool) => driver::execute::<MySql, _>(pool, stmt.as_ref()).await,
+        }
+    }
+
+    /// Run a DDL script, tolerating an index/column that already exists.
+    ///
+    /// MySQL has no `CREATE INDEX IF NOT EXISTS`; the lazy table path re-runs
+    /// the generated DDL against an existing table, so a duplicate index is the
+    /// normal idempotent case, not an error. Migrations use the strict
+    /// [`Self::execute_script`] instead.
+    pub async fn execute_script_tolerant(&self, sql: &str) -> Result<()> {
+        match self.execute_script(sql).await {
+            Ok(()) => Ok(()),
+            Err(error) if is_duplicate_index(&error) || is_duplicate_column(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Run a multi-statement script.
@@ -251,46 +247,63 @@ impl Db {
     /// Dialect-aware DDL needs this: a table plus its indexes is more than one
     /// statement.
     pub async fn execute_script(&self, sql: &str) -> Result<()> {
-        sqlx::raw_sql(sql)
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
-            .map_err(error::map)
+        match &self.pool {
+            DbPool::Sqlite(pool) => driver::script::<Sqlite, _>(pool, sql).await,
+            DbPool::Postgres(pool) => driver::script::<Postgres, _>(pool, sql).await,
+            DbPool::MySql(pool) => driver::script::<MySql, _>(pool, sql).await,
+        }
     }
 
     /// Fetch every row.
     pub async fn fetch_all(&self, stmt: &Stmt) -> Result<Vec<Row>> {
-        let rows = stmt
-            .query()
-            .fetch_all(&self.pool)
-            .await
-            .map_err(error::map)?;
-        Ok(rows.into_iter().map(Row::new).collect())
+        let stmt = stmt.for_dialect(self.dialect);
+        match &self.pool {
+            DbPool::Sqlite(pool) => driver::fetch_all::<Sqlite, _>(pool, stmt.as_ref()).await,
+            DbPool::Postgres(pool) => driver::fetch_all::<Postgres, _>(pool, stmt.as_ref()).await,
+            DbPool::MySql(pool) => driver::fetch_all::<MySql, _>(pool, stmt.as_ref()).await,
+        }
     }
 
     /// Fetch the first row, or `None` when there is none.
     pub async fn fetch_optional(&self, stmt: &Stmt) -> Result<Option<Row>> {
-        let row = stmt.query().fetch_optional(&self.pool).await;
-        crate::row::optional(row).map(|r| r.map(Row::new))
+        let stmt = stmt.for_dialect(self.dialect);
+        match &self.pool {
+            DbPool::Sqlite(pool) => driver::fetch_optional::<Sqlite, _>(pool, stmt.as_ref()).await,
+            DbPool::Postgres(pool) => {
+                driver::fetch_optional::<Postgres, _>(pool, stmt.as_ref()).await
+            }
+            DbPool::MySql(pool) => driver::fetch_optional::<MySql, _>(pool, stmt.as_ref()).await,
+        }
     }
 
     /// Fetch exactly one row, erroring when there is none.
     pub async fn fetch_one(&self, stmt: &Stmt) -> Result<Row> {
-        let row = stmt
-            .query()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(error::map)?;
-        Ok(Row::new(row))
+        let stmt = stmt.for_dialect(self.dialect);
+        match &self.pool {
+            DbPool::Sqlite(pool) => driver::fetch_one::<Sqlite, _>(pool, stmt.as_ref()).await,
+            DbPool::Postgres(pool) => driver::fetch_one::<Postgres, _>(pool, stmt.as_ref()).await,
+            DbPool::MySql(pool) => driver::fetch_one::<MySql, _>(pool, stmt.as_ref()).await,
+        }
     }
 
     /// Fetch a single scalar from the first column of the first row.
     pub async fn fetch_scalar<T>(&self, stmt: &Stmt) -> Result<Option<T>>
     where
-        for<'r> T: sqlx::Decode<'r, Any> + sqlx::Type<Any>,
+        for<'r> T: Decode<'r, Sqlite>
+            + Type<Sqlite>
+            + Decode<'r, Postgres>
+            + Type<Postgres>
+            + Decode<'r, MySql>
+            + Type<MySql>,
     {
-        crate::row::optional(stmt.query().fetch_optional(&self.pool).await)
-            .map(|row| row.and_then(|r| r.try_get::<T, _>(0).ok()))
+        let stmt = stmt.for_dialect(self.dialect);
+        match &self.pool {
+            DbPool::Sqlite(pool) => driver::fetch_scalar::<Sqlite, _, T>(pool, stmt.as_ref()).await,
+            DbPool::Postgres(pool) => {
+                driver::fetch_scalar::<Postgres, _, T>(pool, stmt.as_ref()).await
+            }
+            DbPool::MySql(pool) => driver::fetch_scalar::<MySql, _, T>(pool, stmt.as_ref()).await,
+        }
     }
 
     /// How many rows `stmt` matches.
@@ -426,12 +439,7 @@ impl Db {
 
     /// Begin a transaction.
     pub async fn begin(&self) -> Result<Tx> {
-        let inner = self.pool.begin().await.map_err(|e| {
-            Error::Database(ferris_core::error::DatabaseError::Transaction(
-                e.to_string(),
-            ))
-        })?;
-        Ok(Tx::new(inner, self.dialect))
+        Tx::begin(&self.pool).await
     }
 }
 
@@ -456,12 +464,8 @@ pub(crate) fn count_stmt(stmt: &Stmt) -> Stmt {
 /// migration runner needs one it has pinned, so the advisory lock it acquires
 /// and releases on the same session is meaningful. This is the pinned-session
 /// counterpart.
-pub(crate) async fn execute_script_on(conn: &mut sqlx::AnyConnection, sql: &str) -> Result<()> {
-    sqlx::raw_sql(sql)
-        .execute(&mut *conn)
-        .await
-        .map(|_| ())
-        .map_err(error::map)
+pub(crate) async fn execute_script_on(conn: &mut PinnedConnection, sql: &str) -> Result<()> {
+    conn.script(sql).await
 }
 
 /// Run a bound statement on a specific pooled connection.
@@ -470,27 +474,25 @@ pub(crate) async fn execute_script_on(conn: &mut sqlx::AnyConnection, sql: &str)
 /// runner so its bookkeeping `INSERT` lands on the same connection as the DDL
 /// it records.
 pub(crate) async fn execute_stmt_on(
-    conn: &mut sqlx::AnyConnection,
+    conn: &mut PinnedConnection,
     stmt: &Stmt,
+    dialect: Dialect,
 ) -> Result<Affected> {
-    stmt.query()
-        .execute(&mut *conn)
-        .await
-        .map(|r| Affected(r.rows_affected()))
-        .map_err(error::map)
+    let stmt = stmt.for_dialect(dialect);
+    conn.execute(stmt.as_ref()).await
 }
 
 /// Fetch every row of a bound statement on a specific pooled connection.
 ///
 /// The pinned-session counterpart of [`Db::fetch_all`], so the migration
 /// runner reads the applied set on the same connection it holds the lock on.
-pub(crate) async fn fetch_all_on(conn: &mut sqlx::AnyConnection, stmt: &Stmt) -> Result<Vec<Row>> {
-    let rows = stmt
-        .query()
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(error::map)?;
-    Ok(rows.into_iter().map(Row::new).collect())
+pub(crate) async fn fetch_all_on(
+    conn: &mut PinnedConnection,
+    stmt: &Stmt,
+    dialect: Dialect,
+) -> Result<Vec<Row>> {
+    let stmt = stmt.for_dialect(dialect);
+    conn.fetch_all(stmt.as_ref()).await
 }
 
 /// Whether the error is "that index already exists".
@@ -521,26 +523,13 @@ fn is_duplicate_column(error: &Error) -> bool {
 
 /// Build a pool without touching migrations, for callers that only need a
 /// connection.
-pub(crate) async fn open_pool(config: &ferris_core::DatabaseConfig) -> Result<AnyPool> {
-    sqlx::any::install_default_drivers();
-    let url = crate::pool::database_url(config);
-    let pool = AnyPoolOptions::new()
-        .max_connections(config.max_connections)
-        .min_connections(config.min_connections)
-        .acquire_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
-        .idle_timeout(std::time::Duration::from_secs(config.idle_timeout_secs))
-        .max_lifetime(std::time::Duration::from_secs(config.max_lifetime_secs))
-        .connect(&url)
-        .await
-        .map_err(|e| {
-            Error::Database(ferris_core::error::DatabaseError::Connection(e.to_string()))
-        })?;
-    Ok(pool)
+pub(crate) async fn open_pool(config: &ferris_core::DatabaseConfig) -> Result<DbPool> {
+    driver::open_pool(config).await
 }
 
 /// Column names of a row, in order.
-pub fn column_names(row: &AnyRow) -> Vec<&str> {
-    row.columns().iter().map(Column::name).collect()
+pub fn column_names(row: &DbRow) -> Vec<&str> {
+    row.columns()
 }
 
 /// SHA-256 of `input`, lowercase hexadecimal.

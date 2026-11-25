@@ -25,6 +25,8 @@ tokio-stream = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
+axum-login = { workspace = true }
+tower-sessions = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
@@ -33,3 +35,4 @@ tower = { version = "0.5", features = ["util"] }
 # provider's token/userinfo endpoints (AGENTS §4: the only sanctioned way to
 # exercise an external HTTP dependency).
 wiremock = "0.6"
+time = "0.3"

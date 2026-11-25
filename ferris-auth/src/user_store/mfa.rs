@@ -5,7 +5,9 @@
 //! Kept apart from the login/identity surface in `super` so neither fragment
 //! grows past the size limit.
 
-use ferris_core::{Error, Map, Result, SerializationError, Value};
+use ferris_core::secret::is_secret_envelope;
+use ferris_core::{DocumentError, Error, Map, Result, SecretError, SerializationError, Value};
+use ferris_db::Stmt;
 
 use super::UserStore;
 
@@ -14,19 +16,96 @@ impl UserStore {
     /// secret is pending activation (the enable flow persists it first and only
     /// flips the flag once the first code verifies).
     ///
+    /// `mfa_secret` is a `Secret` field: the engine seals it on write, ordinary
+    /// reads only ever see the mask, and the plaintext comes back exclusively
+    /// through [`ferris_document::DocumentEngine::read_secret`] with
+    /// `reveal_secrets()`.
+    ///
+    /// A row written before the field was declared `Secret` still holds the
+    /// seed in the clear. That legacy value is **returned unchanged** so an
+    /// existing account keeps working; the next [`Self::set_mfa`] seals it.
+    /// An encrypted value the process cannot open (no keyring, retired key) is
+    /// an error, never the envelope handed back as if it were the seed.
+    ///
     /// # Errors
-    /// Propagates storage read failures.
+    /// Propagates storage read failures and an envelope this process cannot
+    /// decrypt.
     #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
     pub async fn mfa_secret(&self, id: &str) -> Result<Option<String>> {
-        Ok(self
-            .load(id)
-            .await?
-            .and_then(|d| {
-                d.get("mfa_secret")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .filter(|s| !s.is_empty()))
+        let meta = crate::doctypes::user_meta();
+        let ctx = crate::store_support::system_context(&meta).reveal_secrets();
+        match self.engine.read_secret(&ctx, id, "mfa_secret").await {
+            Ok(secret) => Ok(secret.map(ferris_core::secret::SecretValue::into_inner)),
+            Err(Error::Document(DocumentError::NotFound { .. })) => Ok(None),
+            // Not a v1 envelope (legacy plaintext) or no keyring at all: the
+            // raw column decides which of the two this is.
+            Err(
+                error @ Error::Secret(SecretError::NotRecoverable { .. } | SecretError::KeyMissing),
+            ) => match self.stored_mfa_secret(id).await? {
+                Some(raw) if is_secret_envelope(&raw) => Err(error),
+                Some(raw) => Ok(Some(raw)),
+                None => Ok(None),
+            },
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The `mfa_secret` column exactly as stored, without the read mask.
+    ///
+    /// Only the legacy-plaintext branch of [`Self::mfa_secret`] uses this: the
+    /// engine's document read replaces a `Secret` value with the mask, so the
+    /// only way to tell an old clear-text seed from a sealed one is the column.
+    #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
+    async fn stored_mfa_secret(&self, id: &str) -> Result<Option<String>> {
+        let table = self.user_table()?;
+        let column = self.user_column("mfa_secret")?;
+        let name = self.user_column("name")?;
+        let row = self
+            .db()
+            .fetch_optional(&Stmt::new(
+                format!("SELECT {column} FROM {table} WHERE {name} = ?"),
+                vec![Value::from(id)],
+            ))
+            .await?;
+        Ok(row
+            .as_ref()
+            .and_then(|row| row.opt_str("mfa_secret"))
+            .map(|raw| raw.trim().to_string())
+            .filter(|raw| !raw.is_empty()))
+    }
+
+    /// Spend TOTP time step `step` for `id`.
+    ///
+    /// Answers `true` only when this statement moved the account's
+    /// `mfa_last_step` forward, which makes a code single-use **across
+    /// processes and replicas**: tracking the matched step (not the current
+    /// one) keeps a fresh code for the next step working, while the code just
+    /// used is refused for as long as the TOTP window would accept it.
+    ///
+    /// One atomic conditional `UPDATE` with no read before it, so two
+    /// concurrent logins carrying the same code cannot both win.
+    ///
+    /// # Errors
+    ///
+    /// Storage errors.
+    #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
+    pub async fn claim_totp_step(&self, id: &str, step: u64) -> Result<bool> {
+        let table = self.user_table()?;
+        let column = self.user_column("mfa_last_step")?;
+        let name = self.user_column("name")?;
+        let step = i64::try_from(step).unwrap_or(i64::MAX);
+        let sql = format!(
+            "UPDATE {table} SET {column} = ? \
+             WHERE {name} = ? AND ({column} IS NULL OR {column} < ?)"
+        );
+        let affected = self
+            .db()
+            .execute(&Stmt::new(
+                sql,
+                vec![Value::from(step), Value::from(id), Value::from(step)],
+            ))
+            .await?;
+        Ok(affected.rows() > 0)
     }
 
     /// Whether the account has MFA enabled (source of truth for the login gate).
@@ -45,8 +124,15 @@ impl UserStore {
     /// Persist the MFA state for a user in one update: the enabled flag, the
     /// secret and the single-use backup code **hashes**.
     ///
+    /// `secret` is the **plaintext** Base32 seed: the engine owns sealing
+    /// (`Secret` fieldtype), so a stored envelope would be rejected as
+    /// double-wrapped. A deployment with MFA must therefore have a `[secrets]`
+    /// keyring installed, or the write fails closed with
+    /// [`SecretError::KeyMissing`].
+    ///
     /// # Errors
-    /// Propagates serialization and storage write failures.
+    /// Propagates serialization, encryption (missing keyring) and storage write
+    /// failures.
     #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
     pub async fn set_mfa(
         &self,

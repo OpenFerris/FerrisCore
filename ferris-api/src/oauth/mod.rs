@@ -1,4 +1,11 @@
-//! OAuth2 HTTP endpoints — a **login**, not a token dispenser.
+//! OAuth2 + userinfo HTTP endpoints — a **login**, not a token dispenser.
+//!
+//! Identity comes from the provider's userinfo endpoint, and the address must be
+//! verified (`email_verified: true`) unless the provider opted out. A stable
+//! `sub` is bound to the account and compared on later logins. OpenID Connect
+//! is **not** implemented: an `id_token` is never validated (no JWKS signature,
+//! no `iss`/`aud`/`nonce`/`exp`), and a provider configured with `oidc = true`
+//! is refused when the manager is built.
 //!
 //! Wraps [`ferris_auth::OAuthManager`] behind axum routes:
 //!
@@ -21,7 +28,7 @@
 //! to read the identity from the provider's userinfo endpoint — and never reach
 //! the browser.
 //!
-//! Non-browser clients (API keys, bearer tokens, the Desk's own session) keep
+//! Non-browser clients (API keys, the Desk's own session) keep
 //! using `POST /api/auth/login` and the REST API. Provider tokens for a *third
 //! party* app would need that app's own client registration (its redirect URI
 //! and PKCE verifier), which is a different feature; riding on the SSO state

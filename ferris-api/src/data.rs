@@ -466,6 +466,7 @@ pub async fn export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::register_probe;
 
     async fn pool() -> Db {
         ferris_db::memory_db().await.expect("in-memory sqlite")
@@ -487,6 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_inserts_the_good_rows_and_reports_the_bad_one() {
+        register_probe();
         let pool = pool().await;
         ferris_document::with_user(Some(admin()), async {
             let req = ImportRequest {
@@ -562,6 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_update_is_authorized_per_document() {
+        register_probe();
         let pool = pool().await;
         ferris_document::with_user(Some(admin()), async {
             for name in ["BULK-1", "BULK-2"] {

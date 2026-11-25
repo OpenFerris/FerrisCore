@@ -5,6 +5,20 @@ use ferris_core::hooks::HookPoint;
 use ferris_core::permissions::Permission;
 use ferris_core::{Error, Result, ValidationError, Value};
 
+/// The per-call switches of `prepare_insert_checked_with`.
+///
+/// Bundled so the entry point keeps a readable arity, and so the shared physical
+/// shape (`create_bulk` resolves one for the whole batch) travels with the flags
+/// it belongs to.
+struct InsertMode<'a> {
+    /// Whether the `Create` permission gate runs.
+    check_create: bool,
+    /// The engine's own explicit-name escape hatch (amend copy only).
+    allow_explicit_name: bool,
+    /// A shape the caller already resolved, or `None` to resolve one here.
+    shape: Option<&'a std::sync::Arc<DocShape>>,
+}
+
 impl DocumentEngine {
     /// Create a document, running validation and hooks.
     ///
@@ -173,9 +187,12 @@ impl DocumentEngine {
                 ctx,
                 forced_owner,
                 data,
-                !allow_single,
-                allow_explicit_name,
                 &mut WriteSink::Db(&self.db),
+                InsertMode {
+                    check_create: !allow_single,
+                    allow_explicit_name,
+                    shape: None,
+                },
             )
             .await?;
         // The document row and its history row are one unit: if the version
@@ -269,11 +286,16 @@ impl DocumentEngine {
         }
         // Prepare (naming/permissions/hooks) *before* opening the transaction:
         // a validation error aborts the batch with nothing written and the
-        // least amount of work wasted.
+        // least amount of work wasted. Every body in the batch has the same
+        // DocType, so the physical shape is resolved once and shared: resolving
+        // it per row cloned the whole metadata and re-classified every field.
+        let shape = std::sync::Arc::new(
+            DocShape::resolve(&self.db, &ctx.doctype, self.db.dialect(), ctx.meta).await?,
+        );
         let mut prepared = Vec::with_capacity(values.len());
         for data in values {
             prepared.push(
-                self.prepare_insert(ctx, None, data, &mut WriteSink::Db(&self.db))
+                self.prepare_insert(ctx, None, data, &mut WriteSink::Db(&self.db), Some(&shape))
                     .await?,
             );
         }
@@ -314,9 +336,20 @@ impl DocumentEngine {
         forced_owner: Option<&str>,
         data: Value,
         naming: &mut WriteSink<'_>,
+        shape: Option<&std::sync::Arc<DocShape>>,
     ) -> Result<PreparedInsert> {
-        self.prepare_insert_checked(ctx, forced_owner, data, true, naming)
-            .await
+        self.prepare_insert_checked_with(
+            ctx,
+            forced_owner,
+            data,
+            naming,
+            InsertMode {
+                check_create: true,
+                allow_explicit_name: false,
+                shape,
+            },
+        )
+        .await
     }
 
     /// [`Self::prepare_insert`] with an explicit `check_create` flag.
@@ -339,8 +372,18 @@ impl DocumentEngine {
         check_create: bool,
         naming: &mut WriteSink<'_>,
     ) -> Result<PreparedInsert> {
-        self.prepare_insert_checked_with(ctx, forced_owner, data, check_create, false, naming)
-            .await
+        self.prepare_insert_checked_with(
+            ctx,
+            forced_owner,
+            data,
+            naming,
+            InsertMode {
+                check_create,
+                allow_explicit_name: false,
+                shape: None,
+            },
+        )
+        .await
     }
 
     /// [`Self::prepare_insert_checked`] plus the engine's own explicit-name
@@ -350,10 +393,14 @@ impl DocumentEngine {
         ctx: &EngineContext<'_>,
         forced_owner: Option<&str>,
         data: Value,
-        check_create: bool,
-        allow_explicit_name: bool,
         naming: &mut WriteSink<'_>,
+        mode: InsertMode<'_>,
     ) -> Result<PreparedInsert> {
+        let InsertMode {
+            check_create,
+            allow_explicit_name,
+            shape,
+        } = mode;
         // Authorization comes **first**: `Create` is a DocType-level grant, so it
         // needs neither the body nor the resolved owner. Asking before any
         // lifecycle work means a caller who may not create cannot make a
@@ -364,6 +411,25 @@ impl DocumentEngine {
         if check_create {
             self.authorize(ctx, "", None, Permission::Create).await?;
         }
+        let shape = match shape {
+            Some(shape) => std::sync::Arc::clone(shape),
+            None => std::sync::Arc::new(
+                DocShape::resolve(&self.db, &ctx.doctype, self.db.dialect(), ctx.meta).await?,
+            ),
+        };
+        // Everything below reads `ctx.meta` (validation, Single defaults, field
+        // permissions); point it at the effective declaration so a custom field
+        // is validated and stored instead of rejected as undeclared. It borrows
+        // the declaration inside the shared shape, so a batch does not re-clone
+        // the metadata per document.
+        let effective;
+        let ctx = match shape.meta.as_ref() {
+            Some(meta) => {
+                effective = effective_context(ctx, meta);
+                &effective
+            }
+            None => ctx,
+        };
         let mut fields = to_fields(&data)?;
         // Field-level write permissions next: drop the fields the caller may
         // not write and hash any `Password` it did supply, before naming, hooks
@@ -372,7 +438,7 @@ impl DocumentEngine {
         // A virtual field is computed on read; a value here would be discarded
         // by the next read, so reject it before any hook can act on it.
         reject_virtual_field_writes(ctx, &fields)?;
-        let table = self.ensure_table(&ctx.doctype).await?;
+        let table = self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
 
         // Frappe's `before_naming`: the controller may set the document's own
         // `name` before the engine mints one. Run it over the fields, then mint
@@ -509,6 +575,10 @@ impl DocumentEngine {
             name,
             document,
             dialect: self.db.dialect(),
+            // Cloned here because `ctx` above borrows the declaration inside
+            // `shape`; the Arc clone is an atomic increment, not a metadata copy.
+            shape: std::sync::Arc::clone(&shape),
+            index_search: search::ready_for(&self.db, &ctx.doctype),
         })
     }
 }

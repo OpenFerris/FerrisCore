@@ -306,3 +306,12 @@ fn attach_stores_a_path_string() {
         assert!(err.to_string().contains("file path string"), "{err}");
     }
 }
+
+#[test]
+fn a_required_field_rejects_an_empty_string() {
+    let mut field = meta("Data");
+    field.reqd = true;
+    assert!(validate_field("title", &Value::Null, &field).is_err());
+    assert!(validate_field("title", &Value::string(""), &field).is_err());
+    assert!(validate_field("title", &Value::string("x"), &field).is_ok());
+}

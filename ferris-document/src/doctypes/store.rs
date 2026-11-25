@@ -158,12 +158,57 @@ impl<'a> DoctypeStore<'a> {
             .get("description")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // The `fields` child table is the columnar projection of the field
+        // list. Prefer `meta_json` above; this fallback is enough for a row
+        // written by hand without it.
+        if let Some(fields) = document.get("fields").and_then(Value::as_array) {
+            meta.fields = fields
+                .iter()
+                .filter_map(|row| {
+                    let fieldname = row.get("fieldname").and_then(Value::as_str)?.to_string();
+                    Some(ferris_schema::FieldMeta {
+                        fieldname,
+                        label: row
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .filter(|label| !label.is_empty())
+                            .map(str::to_string),
+                        fieldtype: row
+                            .get("fieldtype")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Data")
+                            .to_string(),
+                        options: row
+                            .get("options")
+                            .and_then(Value::as_str)
+                            .filter(|options| !options.is_empty())
+                            .map(str::to_string),
+                        default: row
+                            .get("default")
+                            .and_then(Value::as_str)
+                            .filter(|default| !default.is_empty())
+                            .map(str::to_string),
+                        reqd: row.get("reqd").and_then(Value::as_bool).unwrap_or(false),
+                        in_list_view: row
+                            .get("in_list_view")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+        }
         meta.custom = true;
         Ok(meta)
     }
 
     /// Upsert `meta` into `tabDocType`, returning its stored document.
     async fn upsert(&self, meta: &DoctypeMeta) -> Result<Value> {
+        // The engine only creates a column for a field the effective metadata
+        // declares. Registering the framework's `DocType`/`DocField` first
+        // makes the metadata store work even when the host catalog has not run
+        // (tests, an embedder). Idempotent.
+        super::register_doctypes();
         let engine = DocumentEngine::new(self.db.clone());
         let ctx = Self::context();
         let body = Self::body(meta)?;
@@ -338,7 +383,8 @@ mod tests {
         // read was always empty — a vacuous pass. Now the round trip is real: the
         // names are not compiled into this test binary, so loading registers
         // them.
-        let loaded = store.load_into_registry().await.unwrap();
+        let mut loaded = store.load_into_registry().await.unwrap();
+        loaded.sort();
         assert_eq!(
             loaded,
             vec!["Store Probe".to_string(), "Store Probe 2".to_string()],

@@ -70,6 +70,23 @@ async fn booleans_accept_the_integer_shape_sqlite_uses() {
 }
 
 #[tokio::test]
+async fn null_columns_read_as_none_not_as_an_empty_value() {
+    // SQLite's concrete driver spells a NULL blob as an empty slice and a
+    // NULL integer as zero, so the readers must check for NULL before
+    // decoding.
+    let row = Row::new(
+        row_of(&[("text", "NULL"), ("number", "CAST(NULL AS INTEGER)")])
+            .await
+            .unwrap(),
+    );
+    assert!(row.opt_str("text").is_none());
+    assert!(row.opt_i64("number").is_none());
+    assert!(row.opt_f64("number").is_none());
+    assert!(row.opt_bool("number").is_none());
+    assert!(row.opt_json("text").unwrap().is_none());
+}
+
+#[tokio::test]
 async fn booleans_accept_the_text_shape() {
     let row = Row::new(
         row_of(&[("a", "'true'"), ("b", "'0'"), ("c", "'FALSE'")])

@@ -1,9 +1,10 @@
 //! Turn the shared DocType table definition into numbered migrations.
 
+#[cfg(test)]
 use super::schema::{
-    DeclaredIndex, classify_index, document_columns, document_indexes, document_table,
-    is_indexable_column, schema_version,
+    DeclaredIndex, classify_index, document_columns, document_indexes, is_indexable_column,
 };
+use super::schema::{document_table, schema_version};
 use crate::registry::{get_doctype, list_doctypes};
 use ferris_core::Result;
 use ferris_db::sql::Ident;
@@ -69,9 +70,13 @@ impl MigrationRunner {
             };
             let version = schema_version(&meta.name);
             let table = document_table(&meta.name)?;
+            // The native generator creates the system columns, the declared
+            // columns, the child tables and every index in one migration; the
+            // blob-only `create_table_statements` is gone from this path.
             let sql = format!(
                 "{};\n",
-                create_table_statements(self.dialect, &table, &meta)?.join(";\n")
+                crate::doctype_columns::create_doc_type_statements(&meta, self.dialect)?
+                    .join(";\n")
             );
             let migration = Migration {
                 version,
@@ -162,6 +167,7 @@ pub struct PendingMigration {
 /// Every index name is qualified with its table by
 /// [`ferris_db::sql::ensure_index`], so two DocTypes cannot share one physical
 /// index (SCH-03) and a `UNIQUE` declaration keeps its uniqueness per table.
+#[cfg(test)]
 pub(super) fn create_table_statements(
     dialect: Dialect,
     table: &str,

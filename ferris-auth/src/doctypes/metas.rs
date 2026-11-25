@@ -8,8 +8,8 @@ use ferris_schema::DoctypeMeta;
 
 use super::{
     access_log_meta, activity_log_meta, api_key_meta, docperm_meta, has_role_meta,
-    module_profile_meta, role_meta, role_profile_meta, session_meta, user_group_meta,
-    user_invitation_meta, user_meta, user_permission_meta, user_type_meta,
+    module_profile_meta, role_meta, role_profile_meta, user_group_meta, user_invitation_meta,
+    user_meta, user_permission_meta, user_type_meta,
 };
 
 /// Every DocType this crate declares, in registration order.
@@ -21,7 +21,6 @@ pub fn doctype_metas() -> Vec<DoctypeMeta> {
         role_meta(),
         has_role_meta(),
         docperm_meta(),
-        session_meta(),
         api_key_meta(),
         user_group_meta(),
         user_invitation_meta(),

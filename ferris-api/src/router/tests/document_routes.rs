@@ -22,7 +22,7 @@ async fn single_doctype_is_served_by_the_single_routes() {
 
     // The production router scopes the authenticated user as the ambient
     // engine user (`bind_ambient_user`); this harness has to do the same or
-    // every write fails closed. Mirror the JWT subject/roles `bearer` mints.
+    // every write fails closed. Mirror the identity the harness login opens.
     let mut user = ferris_auth::User::system_user("user-1".to_string(), "User 1".to_string());
     user.id = "user-1".to_string();
     user.roles = vec!["System Manager".to_string()];

@@ -109,7 +109,7 @@ impl DocumentEngine {
     /// calling `get_for` is deliberate: `get_for` returns the *redacted*
     /// document, in which the ciphertext has already been replaced by the mask.
     async fn authorized_secret_row(&self, ctx: &EngineContext<'_>, name: &str) -> Result<Value> {
-        let (value, owner) = self.read_row(&ctx.doctype, name).await?;
+        let (value, owner) = self.read_row(ctx, name).await?;
         self.ensure_runtime_tables().await?;
         self.authorize(
             ctx,

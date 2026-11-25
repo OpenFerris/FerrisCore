@@ -1,12 +1,60 @@
 use ferris_core::Value;
 
+use crate::test_support::register_probe;
 use crate::types::{ListParams, ListRequest};
 
 use super::super::DocStore;
 use super::harness::{admin, pool};
 
+/// Columns are the only storage (ADR 0001): a `DocType` with no registry entry
+/// still creates, reads, lists and deletes, but only its system columns exist.
+/// A field the declaration does not own has no column to round-trip through, so
+/// the fixture here deliberately uses a name no suite registers.
 #[tokio::test]
 async fn test_unregistered_doctype_crud() {
+    let pool = pool().await;
+    DocStore::init(&pool).unwrap();
+
+    ferris_document::with_user(Some(admin()), async {
+        let created = DocStore::create(
+            &pool,
+            "UnregisteredProbe",
+            ferris_core::value!({ "name": "P-1" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.get("name").and_then(|v| v.as_str()), Some("P-1"));
+
+        let fetched = DocStore::get(&pool, "UnregisteredProbe", "P-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            fetched.get("docstatus").and_then(|v| v.as_str()),
+            Some("draft")
+        );
+
+        let listed = DocStore::list(&pool, "UnregisteredProbe", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.total, 1);
+
+        DocStore::delete(&pool, "UnregisteredProbe", "P-1")
+            .await
+            .unwrap();
+        assert!(
+            DocStore::get(&pool, "UnregisteredProbe", "P-1")
+                .await
+                .is_err()
+        );
+    })
+    .await;
+}
+
+/// The registered counterpart: a declared field owns a column, so create,
+/// read, update, list and delete all round-trip it.
+#[tokio::test]
+async fn test_registered_doctype_crud_round_trips_declared_fields() {
+    register_probe();
     let pool = pool().await;
     DocStore::init(&pool).unwrap();
 
@@ -54,6 +102,7 @@ async fn test_unregistered_doctype_crud() {
 
 #[tokio::test]
 async fn test_list_requested_ops_order_and_search() {
+    register_probe();
     let pool = pool().await;
     ferris_document::with_user(Some(admin()), async {
         for (name, qty) in [("P-1", 3u64), ("P-2", 8), ("P-3", 5), ("P-4", 1)] {

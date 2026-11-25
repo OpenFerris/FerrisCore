@@ -34,6 +34,7 @@ pub use engagement::{CommentStore, DocComment, EngagementPage, LikeState, LikeSt
 pub use engine::{
     ApplyKind, ApplyOp, DocumentEngine, EngineContext, ListQuery, SYSTEM_FIELDS,
     VirtualDoctypeProvider, VirtualFieldProvider, register_virtual_doctype, register_virtual_field,
+    table_name,
 };
 pub use ferris_core::DocStatus;
 pub use filters::{FilterOp, ListFilter, parse_list_filters};

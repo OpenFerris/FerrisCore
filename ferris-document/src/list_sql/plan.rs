@@ -2,17 +2,18 @@ use super::render::*;
 use super::types::*;
 use crate::filters::ListFilter;
 use ferris_core::{Result, Value};
-use ferris_db::sql::{Ident, json_field_target};
+use ferris_db::sql::Ident;
 use ferris_db::{Dialect, Stmt};
+use ferris_schema::FieldMeta;
 
 impl Plan {
-    /// Build a plan from the column- and index-backed part of a query.
+    /// Build a plan from the column-backed part of a query.
     ///
-    /// `json_indexed_fields` are the document fields this DocType declares a
-    /// single-field index over ([`DoctypeMeta::json_indexed_fields`]). For them
-    /// the plan may push **exact** predicates (`=`, `in`) and ordering into SQL,
-    /// because `data.field` is what the index is built on; everything else it
-    /// returns as [`Residual`] for the caller to evaluate in Rust.
+    /// `columns` are the DocType's declared fields that own a physical column
+    /// (the engine's effective shape). The value is bound with the type the
+    /// column takes (`BIGINT`, `DOUBLE`, `BOOLEAN` or text), and ordering by one
+    /// becomes a plain `ORDER BY` the column index can serve. Every other field
+    /// stays in Rust and is returned as a [`Residual`].
     ///
     /// Returns the plan plus every filter it could not represent, so the caller
     /// can keep evaluating those in Rust and log them.
@@ -21,33 +22,31 @@ impl Plan {
         filter_ops: &[ListFilter],
         search: Option<&str>,
         order_by: Option<&str>,
-        json_indexed_fields: &[String],
+        columns: &[FieldMeta],
     ) -> (Self, Vec<Residual>) {
         let mut plan = Plan::default();
+        plan.projection = SELECT_COLUMNS
+            .iter()
+            .map(|column| (*column).to_string())
+            .collect();
+        for field in columns {
+            if !plan.projection.contains(&field.fieldname) {
+                plan.projection.push(field.fieldname.clone());
+            }
+        }
         let mut residual = Vec::new();
-        let is_json_indexed = |field: &str| json_indexed_fields.iter().any(|f| f == field);
 
         for (field, value) in filters {
-            if is_json_indexed(field) {
-                // The hash map is the legacy REST spelling of an equality, and
-                // it hands the value over as a typed `Value`. Only a non-empty
-                // `String` compares the same in SQL as in Rust: the expression
-                // index holds exact text, while the Rust path coerces cells
-                // with `cell_str` (a missing cell is `""`) and compares
-                // numbers against strings structurally. A number, a boolean or
-                // an empty string would narrow the result set instead of
-                // filtering it, so those stay in Rust and the plan is honest
-                // that they did.
-                match value {
-                    Value::String(s) if !s.is_empty() => {
-                        plan.predicates.push(Predicate::JsonEq {
-                            field: field.clone(),
-                            value: value.clone(),
-                        });
-                    }
-                    _ => residual.push(Residual {
+            // A declared field's column is authoritative.
+            if let Some(declared) = declared_column(columns, field) {
+                match declared_equality(declared, value) {
+                    Ok(converted) => plan.predicates.push(Predicate::Eq {
+                        column: field.clone(),
+                        value: converted,
+                    }),
+                    Err(reason) => residual.push(Residual {
                         field: field.clone(),
-                        reason: ResidualReason::JsonExactNotPushed,
+                        reason,
                     }),
                 }
                 continue;
@@ -87,11 +86,28 @@ impl Plan {
             }
         } else {
             for f in filter_ops {
+                // Declared fields have a real column, so the operator path can
+                // push typed equality/in/range and text `LIKE`; a field with
+                // no column stays in Rust.
+                if let Some(declared) = declared_column(columns, &f.field) {
+                    match declared_filter_predicate(declared, f) {
+                        Ok(Some(predicate)) => plan.predicates.push(predicate),
+                        Ok(None) => residual.push(Residual {
+                            field: f.field.clone(),
+                            reason: ResidualReason::UnsupportedOperator,
+                        }),
+                        Err(reason) => residual.push(Residual {
+                            field: f.field.clone(),
+                            reason,
+                        }),
+                    }
+                    continue;
+                }
                 if let Some(predicates) = represented_filter(f) {
                     plan.predicates.extend(predicates);
                     continue;
                 }
-                match sql_predicate(f, json_indexed_fields) {
+                match sql_predicate(f) {
                     Ok(Some(p)) => plan.predicates.push(p),
                     Ok(None) => residual.push(Residual {
                         field: f.field.clone(),
@@ -106,8 +122,8 @@ impl Plan {
         }
 
         // A substring search walks every string leaf of the document, so it is
-        // a blob predicate by construction and can never be pushed down. It is
-        // recorded so the reason is visible rather than inferred.
+        // a document predicate by construction and can never be pushed down.
+        // It is recorded so the reason is visible rather than inferred.
         if let Some(needle) = search {
             if !needle.trim().is_empty() {
                 residual.push(Residual {
@@ -125,14 +141,8 @@ impl Plan {
                     .next()
                     .map(|t| t.eq_ignore_ascii_case("desc"))
                     .unwrap_or(false);
-                if is_column_field(field) {
+                if is_column_field(field) || declared_column(columns, field).is_some() {
                     plan.order_by = Some((OrderKey::Column(field.to_string()), desc));
-                } else if is_json_indexed(field) {
-                    // The DocType declared an index over this blob field, so the
-                    // database can order by its JSON value like it orders by a
-                    // column. Missing/null values sort last in both directions,
-                    // matching `filters::order_documents`.
-                    plan.order_by = Some((OrderKey::JsonField(field.to_string()), desc));
                 } else {
                     plan.order_in_rust = true;
                     residual.push(Residual {
@@ -210,7 +220,7 @@ impl Plan {
         Ident::new(column)?;
         self.predicates.push(Predicate::In {
             column: column.to_string(),
-            values,
+            values: values.into_iter().map(Value::string).collect(),
         });
         Ok(self)
     }
@@ -238,16 +248,16 @@ impl Plan {
                 let column = Ident::new(field)?.quote(dialect);
                 format!(" ORDER BY {column} {direction}")
             }
-            OrderKey::JsonField(field) => {
-                let target = json_field_target(dialect, field)?;
-                // `order_documents` sorts an empty/missing cell *last* in both
-                // directions. A blob field has no cell for a row that omits it,
-                // which the expression yields as SQL NULL; ordering on
-                // `IS NULL` first reproduces "empty last" for ASC and DESC
-                // alike without a dialect-specific `NULLS LAST` spelling.
-                format!(" ORDER BY ({target}) IS NULL ASC, {target} {direction}")
-            }
         }))
+    }
+
+    /// The quoted projection: the system columns plus every declared column.
+    fn projection_sql(&self, dialect: Dialect) -> Result<String> {
+        self.projection
+            .iter()
+            .map(|column| Ident::new(column).map(|ident| ident.quote(dialect)))
+            .collect::<Result<Vec<_>>>()
+            .map(|quoted| quoted.join(", "))
     }
 
     /// The `ORDER BY` for a paging query: the requested order (or the engine's
@@ -297,7 +307,8 @@ impl Plan {
         // one, because `LIMIT`/`OFFSET` has no notion of a set.
         let order = self.paging_order_clause(dialect)?;
         let sql = format!(
-            "SELECT data, owner FROM {quoted}{where_sql}{order} LIMIT ? OFFSET ?",
+            "SELECT {} FROM {quoted}{where_sql}{order} LIMIT ? OFFSET ?",
+            self.projection_sql(dialect)?,
             where_sql = where_sql.unwrap_or_default(),
         );
         params.push(Value::from(i64::from(limit)));
@@ -322,7 +333,8 @@ impl Plan {
         let where_sql = self.where_clause(dialect, &mut params)?;
         let order = self.paging_order_clause(dialect)?;
         let sql = format!(
-            "SELECT data, owner FROM {quoted}{where_sql}{order}",
+            "SELECT {} FROM {quoted}{where_sql}{order}",
+            self.projection_sql(dialect)?,
             where_sql = where_sql.unwrap_or_default()
         );
         Ok(Stmt::new(sql, params))

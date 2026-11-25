@@ -31,14 +31,22 @@ fn document_columns_are_one_definition_for_every_dialect() {
     let sqlite = ferris_db::sql::create_table(Dialect::SQLite, "tabToDo", &columns).unwrap();
     let mysql = ferris_db::sql::create_table(Dialect::MySQL, "tabToDo", &columns).unwrap();
 
-    // The engine reads and writes `data`, so it has to exist on every
-    // backend; the generated migration used to omit it entirely.
-    assert!(sqlite.contains("\"data\" TEXT NOT NULL"));
-    assert!(mysql.contains("`data` TEXT NOT NULL"));
+    // Columns are the only source of truth: there is no JSON blob.
+    assert!(!sqlite.contains("\"data\""));
+    assert!(!mysql.contains("`data`"));
 
-    // And nothing may be NOT NULL that the engine does not write.
-    assert!(!sqlite.contains("modified_by"));
-    assert!(!mysql.contains("modified_by"));
+    // The engine-stamped columns every table owns, including the three that
+    // used to live only inside the blob.
+    for column in ["modified_by", "amended_from", "workflow_state"] {
+        assert!(
+            sqlite.contains(&format!("\"{column}\" VARCHAR(255)")),
+            "{sqlite}"
+        );
+        assert!(
+            mysql.contains(&format!("`{column}` VARCHAR(255)")),
+            "{mysql}"
+        );
+    }
 
     // `name` is the key, so an upsert on it has a unique constraint.
     assert!(sqlite.contains("PRIMARY KEY (\"name\")"));
@@ -71,7 +79,7 @@ fn standard_indexes_are_named_per_table() {
         let beta = create_table_statements(dialect, "tabBeta", &DoctypeMeta::default()).unwrap();
 
         for (statements, table) in [(&alpha, "tabAlpha"), (&beta, "tabBeta")] {
-            for suffix in ["owner", "modified", "docstatus"] {
+            for suffix in ["owner", "modified", "docstatus", "owner_modified"] {
                 let name = format!("idx_{table}_{suffix}");
                 assert!(
                     statements.iter().any(|s| s.contains(&name)),
@@ -89,8 +97,8 @@ fn standard_indexes_are_named_per_table() {
         };
         let alpha_indexes = indexes(&alpha);
         let beta_indexes = indexes(&beta);
-        assert_eq!(alpha_indexes.len(), 3, "{dialect:?}: {alpha:?}");
-        assert_eq!(beta_indexes.len(), 3, "{dialect:?}: {beta:?}");
+        assert_eq!(alpha_indexes.len(), 4, "{dialect:?}: {alpha:?}");
+        assert_eq!(beta_indexes.len(), 4, "{dialect:?}: {beta:?}");
         assert!(
             alpha_indexes.iter().all(|s| !beta_indexes.contains(s)),
             "{dialect:?}: the two tables share an index statement"
@@ -197,8 +205,8 @@ fn declared_unique_indexes_keep_uniqueness_per_table() {
     let meta = |name: &str| DoctypeMeta {
         name: name.to_string(),
         indexes: vec![IndexMeta {
-            name: "idx_code".to_string(),
-            fields: vec!["code".to_string()],
+            name: "idx_owner".to_string(),
+            fields: vec!["owner".to_string()],
             unique: true,
             index_type: 0,
         }],
@@ -210,11 +218,11 @@ fn declared_unique_indexes_keep_uniqueness_per_table() {
         let alpha_sql = alpha.join("\n");
         let beta_sql = beta.join("\n");
         assert!(
-            alpha_sql.contains("CREATE UNIQUE INDEX") && alpha_sql.contains("idx_tabAlpha_code"),
+            alpha_sql.contains("CREATE UNIQUE INDEX") && alpha_sql.contains("idx_tabAlpha_owner"),
             "{dialect:?}: {alpha_sql}"
         );
         assert!(
-            beta_sql.contains("CREATE UNIQUE INDEX") && beta_sql.contains("idx_tabBeta_code"),
+            beta_sql.contains("CREATE UNIQUE INDEX") && beta_sql.contains("idx_tabBeta_owner"),
             "{dialect:?}: {beta_sql}"
         );
     }
@@ -322,17 +330,25 @@ fn a_migration_creates_exactly_the_engines_table() {
 // ---------------------------------------------------------------------
 
 #[test]
-fn only_real_non_data_columns_are_indexable_columns() {
-    for field in ["name", "owner", "docstatus", "creation", "modified"] {
+fn every_system_column_is_indexable_and_other_names_are_not() {
+    for field in [
+        "name",
+        "owner",
+        "docstatus",
+        "creation",
+        "modified",
+        "modified_by",
+        "amended_from",
+        "workflow_state",
+    ] {
         assert!(is_indexable_column(field), "{field} is a column");
     }
-    // `data` is a column, but it holds the whole document: an index over it
-    // as if it were one field is meaningless. `modified_by` lives only in
-    // the blob, like any other document field.
-    for field in ["data", "modified_by", "device_id", "title", ""] {
+    // A declared field has a column only when the DocType declares it, which
+    // this fixed list cannot know; an unknown name is not a system column.
+    for field in ["data", "device_id", "title", ""] {
         assert!(
             !is_indexable_column(field),
-            "{field} is not a single field column"
+            "{field} is not a system column"
         );
     }
 }
@@ -343,7 +359,7 @@ fn only_real_non_data_columns_are_indexable_columns() {
 /// member, or an empty list — is skipped rather than emitted as DDL that
 /// references a phantom column.
 #[test]
-fn classify_index_splits_columns_from_json_fields() {
+fn classify_index_splits_columns_from_unsupported_shapes() {
     let index = |fields: &[&str]| IndexMeta {
         name: "idx".to_string(),
         fields: fields.iter().map(|s| s.to_string()).collect(),
@@ -359,12 +375,13 @@ fn classify_index_splits_columns_from_json_fields() {
         classify_index(&index(&["owner", "modified"])),
         DeclaredIndex::Columns
     ));
+    // `device_id` is not a system column: the runner cannot classify a
+    // declared field here, so it stays unsupported rather than inventing a
+    // JSON expression over a column that does not exist.
     assert!(matches!(
         classify_index(&index(&["device_id"])),
-        DeclaredIndex::JsonField("device_id")
+        DeclaredIndex::Unsupported
     ));
-    // A mixed composite has no portable spelling: MySQL would need one
-    // generated column per blob field.
     assert!(matches!(
         classify_index(&index(&["owner", "device_id"])),
         DeclaredIndex::Unsupported
@@ -379,11 +396,11 @@ fn classify_index_splits_columns_from_json_fields() {
     ));
 }
 
-/// The migration DDL for a blob-field declaration is a JSON expression
-/// index, not a `CREATE INDEX` over a column that does not exist — the
-/// failure the migration used to hit only when it actually ran.
+/// A declaration that names a field with no column is skipped now that there
+/// is no `data` blob: it must not emit a JSON expression index over a column
+/// the table does not have.
 #[test]
-fn a_declared_index_over_a_blob_field_migrates_as_a_json_expression() {
+fn a_declared_index_over_a_missing_column_is_skipped() {
     let meta = DoctypeMeta {
         name: "SolmecRead".to_string(),
         indexes: vec![IndexMeta {
@@ -396,46 +413,17 @@ fn a_declared_index_over_a_blob_field_migrates_as_a_json_expression() {
     };
     let table = document_table(&meta.name).unwrap();
 
-    let sqlite = create_table_statements(Dialect::SQLite, &table, &meta).unwrap();
-    assert!(
-        sqlite.iter().any(|s| s.contains(
-            "CREATE INDEX IF NOT EXISTS \"idx_tabSolmecRead_reads_device\" ON \"tabSolmecRead\" \
-             (json_extract(\"data\", '$.device_id'))"
-        )),
-        "{sqlite:?}"
-    );
-    // No statement names `device_id` as if it were a column.
-    assert!(
-        !sqlite.iter().any(|s| s.contains("(\"device_id\")")),
-        "{sqlite:?}"
-    );
-
-    // MySQL's two-statement shape: generated column, then its index. They
-    // come *after* the table and the three standard indexes, so the count
-    // is CREATE TABLE + 3 standard + ADD COLUMN + CREATE INDEX — and the
-    // assertions locate each by content, not by a positional index that
-    // would shift the moment a standard index is added.
-    let mysql = create_table_statements(Dialect::MySQL, &table, &meta).unwrap();
-    assert_eq!(mysql.len(), 6, "{mysql:?}");
-    let alter = mysql
-        .iter()
-        .find(|s| s.contains("ADD COLUMN `g_device_id`"))
-        .unwrap_or_else(|| panic!("no generated mirror column in {mysql:?}"));
-    assert!(
-        alter.contains("BINARY json_unquote(json_extract(`data`, '$.device_id'))"),
-        "{alter}"
-    );
-    let create = mysql
-        .iter()
-        .find(|s| s.starts_with("CREATE") && s.contains("(`g_device_id`)"))
-        .unwrap_or_else(|| panic!("no index over the generated column in {mysql:?}"));
-    assert!(
-        create.contains("`idx_tabSolmecRead_reads_device`"),
-        "{create}"
-    );
-    // No statement names `device_id` as if it were a column.
-    assert!(
-        !mysql.iter().any(|s| s.contains("(`device_id`)")),
-        "{mysql:?}"
-    );
+    for dialect in [Dialect::SQLite, Dialect::Postgres, Dialect::MySQL] {
+        let statements = create_table_statements(dialect, &table, &meta).unwrap();
+        let joined = statements.join("\n");
+        assert!(!joined.contains("json_extract"), "{dialect:?}: {joined}");
+        assert!(
+            !joined.contains("idx_reads_device"),
+            "{dialect:?}: {joined}"
+        );
+        assert!(
+            !joined.contains("(\"device_id\")") && !joined.contains("(`device_id`)"),
+            "{dialect:?}: {joined}"
+        );
+    }
 }

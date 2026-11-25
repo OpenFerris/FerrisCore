@@ -140,7 +140,7 @@ async fn field_permissions_hide_admin_fields_and_mask_passwords() {
 
     let name = created.get("name").unwrap().as_str().unwrap().to_string();
     // The stored blob holds only the hash, and never received the admin note.
-    let (stored, _owner) = engine.read_row("Vault", &name).await.unwrap();
+    let (stored, _owner) = engine.read_row(&ctx, &name).await.unwrap();
     assert!(stored.get("admin_note").is_none());
     assert_eq!(
         stored.get("password").and_then(|v| v.as_str()),
@@ -183,7 +183,7 @@ async fn system_manager_sees_admin_fields_but_never_the_password_hash() {
     assert_eq!(created.get("password").and_then(|v| v.as_str()), Some(MASK));
 
     let name = created.get("name").unwrap().as_str().unwrap().to_string();
-    let (stored, _) = engine.read_row("Vault", &name).await.unwrap();
+    let (stored, _) = engine.read_row(&ctx, &name).await.unwrap();
     assert_eq!(
         stored.get("password").and_then(|v| v.as_str()),
         Some("hashed:hunter2")
@@ -244,7 +244,7 @@ async fn update_cannot_move_a_field_beyond_the_callers_level() {
     assert!(updated.get("admin_note").is_none());
 
     // The stored admin note is untouched.
-    let (stored, _owner) = engine.read_row("Vault", &name).await.unwrap();
+    let (stored, _owner) = engine.read_row(&open, &name).await.unwrap();
     assert_eq!(
         stored.get("admin_note").and_then(|v| v.as_str()),
         Some("n1")
@@ -278,7 +278,7 @@ async fn a_password_mask_on_write_keeps_the_stored_hash() {
         .await
         .unwrap();
 
-    let (stored, _owner) = engine.read_row("Vault", &name).await.unwrap();
+    let (stored, _owner) = engine.read_row(&ctx, &name).await.unwrap();
     assert_eq!(
         stored.get("password").and_then(|v| v.as_str()),
         Some("hashed:hunter2"),
@@ -328,7 +328,7 @@ async fn a_secret_round_trips_only_through_the_revealed_reader() {
     );
 
     // Stored: an envelope, and the plaintext is not in it.
-    let (stored, _owner) = engine.read_row("VaultS", &name).await.unwrap();
+    let (stored, _owner) = engine.read_row(&ctx, &name).await.unwrap();
     let envelope = stored
         .get("client_secret")
         .and_then(Value::as_str)
@@ -403,7 +403,7 @@ async fn a_secret_mask_on_write_keeps_the_stored_value() {
         .await
         .unwrap();
     let name = created.get("name").unwrap().as_str().unwrap().to_string();
-    let (before, _) = engine.read_row("VaultS", &name).await.unwrap();
+    let (before, _) = engine.read_row(&ctx, &name).await.unwrap();
     let envelope_before = before
         .get("client_secret")
         .and_then(Value::as_str)
@@ -418,7 +418,7 @@ async fn a_secret_mask_on_write_keeps_the_stored_value() {
         )
         .await
         .unwrap();
-    let (after, _) = engine.read_row("VaultS", &name).await.unwrap();
+    let (after, _) = engine.read_row(&ctx, &name).await.unwrap();
     assert_eq!(
         after.get("client_secret").and_then(Value::as_str),
         Some(envelope_before.as_str()),
@@ -433,7 +433,7 @@ async fn a_secret_mask_on_write_keeps_the_stored_value() {
         )
         .await
         .unwrap();
-    let (rotated, _) = engine.read_row("VaultS", &name).await.unwrap();
+    let (rotated, _) = engine.read_row(&ctx, &name).await.unwrap();
     assert_ne!(
         rotated.get("client_secret").and_then(Value::as_str),
         Some(envelope_before.as_str())
@@ -459,30 +459,34 @@ async fn a_hashed_legacy_value_is_reported_not_returned() {
     install_test_keyring();
     let engine = engine().await;
 
-    // The row was written while the field was still declared `Password`, so it
-    // holds an Argon2 hash. Reproduce that by writing through a metadata that
-    // does not declare the field at all (no encryption applies).
-    let undeclared = DoctypeMeta {
-        name: "VaultS".to_string(),
-        fields: vec![field("title", "Data", 0)],
-        ..Default::default()
-    };
-    let writer = EngineContext::new("VaultS", "")
-        .with_meta(&undeclared)
-        .allow_anonymous(true);
-    let created = engine
-        .create(
-            &writer,
-            ferris_core::value!({
-                "title": "legacy",
-                "client_secret": "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA"
-            }),
-        )
+    let meta = secret_meta();
+    // The column exists (the DocType declares the field), but the value is a
+    // legacy Argon2 hash from a row written before the field was a `Secret`.
+    // Insert it around the engine so no hook encrypts it.
+    engine
+        .ensure_table_with("VaultS", Some(&meta))
         .await
         .unwrap();
-    let name = created.get("name").unwrap().as_str().unwrap().to_string();
+    engine
+        .db()
+        .execute(&Stmt::new(
+            "INSERT INTO tabVaultS \
+             (name, owner, docstatus, creation, modified, title, client_secret) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                Value::from("VAULTS-LEGACY"),
+                Value::Null,
+                Value::from(0_i64),
+                Value::from(1_i64),
+                Value::from(1_i64),
+                Value::from("legacy"),
+                Value::from("$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA"),
+            ],
+        ))
+        .await
+        .unwrap();
+    let name = "VAULTS-LEGACY".to_string();
 
-    let meta = secret_meta();
     let reader = EngineContext::new("VaultS", "")
         .with_meta(&meta)
         .allow_anonymous(true);

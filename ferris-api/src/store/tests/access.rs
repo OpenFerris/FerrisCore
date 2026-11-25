@@ -1,6 +1,7 @@
 use ferris_core::{Error, Value};
 use ferris_document::{DocStatus, DocumentEngine, EngineContext};
 
+use crate::test_support::register_probe;
 use crate::types::ListParams;
 
 use super::super::meta::context;
@@ -16,6 +17,7 @@ use super::harness::{admin, pool};
 async fn a_persisted_share_grants_get_and_list_to_the_invited_user() {
     use ferris_document::sharing::{ShareManager, SharePermission};
 
+    register_probe();
     let pool = pool().await;
     DocStore::init(&pool).unwrap();
     ferris_document::with_user(Some(admin()), async {
@@ -138,6 +140,7 @@ async fn document_exists_distinguishes_denied_read_from_missing_row() {
 /// authenticated caller. These are the HTTP-level regression tests.
 #[tokio::test]
 async fn rest_reads_do_not_leak_documents_of_other_owners() {
+    register_probe();
     let pool = pool().await;
     DocStore::init(&pool).unwrap();
 
@@ -211,6 +214,7 @@ async fn rest_reads_do_not_leak_documents_of_other_owners() {
 /// submitted document.
 #[tokio::test]
 async fn rest_amend_requires_amend_permission() {
+    register_probe();
     let pool = pool().await;
     DocStore::init(&pool).unwrap();
 

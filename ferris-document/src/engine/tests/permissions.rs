@@ -570,3 +570,113 @@ async fn update_after_submit_without_metadata_locks_every_field() {
         .await
         .unwrap();
 }
+
+/// `User Permission` narrows writes, not only reads (FRA-03, write half).
+///
+/// Before this test the owner shortcut admitted a write on any row the user
+/// owned, and `delete` never looked at the stored document at all, so an
+/// operator restricting a user to `CUST-A` was protecting only the list view.
+#[tokio::test]
+async fn a_user_permission_narrows_update_and_delete() {
+    use crate::engine::tests::user_permission_source::install;
+    use ferris_core::permissions::{
+        PermissionEngine, Policy, PolicyStatement, Principal, Resource, UserPermissionRule,
+        global_engine_ref, set_global_engine,
+    };
+    use std::sync::{Mutex, MutexGuard};
+
+    struct Restore {
+        _serialised: MutexGuard<'static, ()>,
+        previous: PermissionEngine,
+    }
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_global_engine(self.previous.clone());
+        }
+    }
+
+    static POLICY_SERIALISE: Mutex<()> = Mutex::new(());
+
+    fn allow_delete(doctype: &str, role: &str) -> Restore {
+        let serialised = POLICY_SERIALISE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = global_engine_ref()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut policy = PermissionEngine::default();
+        policy.add_policy(Policy::new(vec![PolicyStatement::allow(
+            vec![Principal::role(role)],
+            vec![Permission::Delete],
+            vec![Resource::new(doctype, "*")],
+        )]));
+        set_global_engine(policy);
+        Restore {
+            _serialised: serialised,
+            previous,
+        }
+    }
+
+    let meta = DoctypeMeta {
+        name: "D1Customer".to_string(),
+        fields: vec![field("title", "Data", 0)],
+        ..Default::default()
+    };
+    register_common_doctypes();
+    let engine = DocumentEngine::new(ferris_db::memory_db().await.unwrap());
+    let create_ctx = EngineContext::new("D1Customer", "")
+        .with_meta(&meta)
+        .with_explicit_name()
+        .allow_anonymous(true);
+    for (name, title) in [("CUST-A", "a"), ("CUST-B", "b")] {
+        engine
+            .create_owned_by(
+                &create_ctx,
+                "ada@local",
+                ferris_core::value!({ "name": name, "title": title }),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut user = ferris_core::User::system_user("ada@local".to_string(), "Ada".to_string());
+    user.id = "ada@local".to_string();
+    user.roles = vec!["D1 Reader".to_string()];
+    let ctx = EngineContext::new("D1Customer", "")
+        .with_meta(&meta)
+        .with_user(&user);
+
+    let _rules = install(vec![UserPermissionRule::new(
+        "ada@local",
+        "D1Customer",
+        "CUST-A",
+    )]);
+
+    // The owner shortcut would grant Write on CUST-B; the row rule must win.
+    let error = engine
+        .update(&ctx, "CUST-B", ferris_core::value!({ "title": "changed" }))
+        .await
+        .unwrap_err();
+    assert!(
+        denied(&error),
+        "update of a forbidden row must be denied: {error:?}"
+    );
+    let untouched = engine.get(&create_ctx, "CUST-B").await.unwrap();
+    assert_eq!(untouched.get("title").and_then(Value::as_str), Some("b"));
+
+    engine
+        .update(&ctx, "CUST-A", ferris_core::value!({ "title": "ok" }))
+        .await
+        .unwrap();
+
+    // Delete needs its own grant; the owner shortcut does not include it.
+    let _policy = allow_delete("D1Customer", "D1 Reader");
+    let error = engine.delete(&ctx, "CUST-B").await.unwrap_err();
+    assert!(
+        denied(&error),
+        "delete of a forbidden row must be denied: {error:?}"
+    );
+    engine.delete(&ctx, "CUST-A").await.unwrap();
+}

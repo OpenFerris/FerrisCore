@@ -19,23 +19,37 @@ ferris-schema = { path = "../ferris-schema" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-jsonwebtoken = { version = "9.3" }
 argon2 = { version = "0.5", features = ["std"] }
-cookie = { version = "0.17", features = ["percent-encoding", "signed"] }
+cookie = { version = "0.17", features = ["percent-encoding", "signed"], optional = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
 axum = { workspace = true }
-axum-extra = { version = "0.12", features = ["cookie", "multipart", "form", "typed-header"] }
-reqwest = { workspace = true }
+axum-login = { workspace = true }
+tower-sessions = { workspace = true }
+totp-rs = { workspace = true }
+# `tower_sessions::session::Record::expiry_date` is a `time::OffsetDateTime` and
+# tower-sessions does not re-export `time`, so the session store has to name the
+# type to convert it to/from the `BIGINT` expiry column. Already in the locked
+# graph through rcgen/tower-sessions; this only makes the edge explicit.
+time = { workspace = true }
+# OAuth2/OIDC HTTP client. Optional so a deployment that does not use OAuth can
+# build `ferris-auth` without `reqwest` and its TLS stack; the `oauth` feature
+# is on by default, so existing consumers keep the previous surface.
+reqwest = { workspace = true, optional = true }
 parking_lot = { workspace = true }
-hmac = { workspace = true }
-sha1 = { version = "0.10" }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-url = { version = "2.5" }
+# `url` only parses provider/auth URLs in the OAuth module; optional with it so
+# a non-OAuth build does not carry an unused edge.
+url = { version = "2.5", optional = true }
+
+[features]
+default = ["oauth"]
+oauth = ["dep:cookie", "dep:reqwest", "dep:url"]
+
 [dev-dependencies]
 wiremock = "0.6"

@@ -1,12 +1,19 @@
-use super::manager::PendingState;
+use super::state_store::PendingState;
 use super::*;
 use ferris_core::Error;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 #[test]
 fn test_oauth_config() {
     let config = OAuthConfig::default();
     assert!(config.providers.is_empty());
     assert!(config.state_store.enabled);
+}
+
+async fn memory_db() -> ferris_db::Db {
+    ferris_db::memory_db().await.expect("in-memory db")
 }
 
 fn provider_with_token_url(token_url: String) -> OAuthProviderConfig {
@@ -22,6 +29,18 @@ fn provider_with_token_url(token_url: String) -> OAuthProviderConfig {
         pkce_enabled: false,
         pkce_method: PkceMethod::S256,
         redirect_uris: vec!["https://app.example/callback".to_string()],
+        require_verified_email: true,
+        oidc: false,
+    }
+}
+
+fn config_with(provider: OAuthProviderConfig) -> OAuthConfig {
+    OAuthConfig {
+        providers: vec![provider],
+        state_store: StateStoreConfig {
+            enabled: true,
+            ttl_seconds: 600,
+        },
     }
 }
 
@@ -46,20 +65,20 @@ async fn a_disabled_state_store_still_completes_the_callback() {
         .await;
 
     let provider = provider_with_token_url(format!("{}/token", server.uri()));
-    let mut config = OAuthConfig {
+    let config = OAuthConfig {
         providers: vec![provider],
         state_store: StateStoreConfig {
             enabled: false,
             ttl_seconds: 600,
         },
     };
-    config.state_store.enabled = false;
     let mut manager = OAuthManager::new(config).unwrap();
 
     // `authorize` succeeds but stores nothing.
-    let (_, oauth_state) = manager.authorize("test").unwrap();
-    assert!(
-        manager.state_store.is_empty(),
+    let (_, oauth_state) = manager.authorize("test").await.unwrap();
+    assert_eq!(
+        manager.state_store.memory_len(),
+        Some(0),
         "disabled store keeps nothing"
     );
 
@@ -73,32 +92,264 @@ async fn a_disabled_state_store_still_completes_the_callback() {
 
 /// AUTH4: `authorize` prunes expired states, so an abandoned login cannot
 /// grow the in-memory store without bound.
-#[test]
-fn authorize_prunes_expired_states() {
-    let mut manager = OAuthManager::new(OAuthConfig {
-        providers: vec![provider_with_token_url(
-            "https://provider.example/token".to_string(),
-        )],
-        state_store: StateStoreConfig {
-            enabled: true,
-            ttl_seconds: 600,
-        },
-    })
+#[tokio::test]
+async fn authorize_prunes_expired_states() {
+    let mut manager = OAuthManager::new(config_with(provider_with_token_url(
+        "https://provider.example/token".to_string(),
+    )))
     .unwrap();
 
     // Seed an already-expired entry, then run a fresh authorize.
-    manager.state_store.insert(
-        "stale".to_string(),
-        PendingState {
-            provider: "test".to_string(),
-            pkce_verifier: None,
-            expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
-        },
-    );
-    let (_, state) = manager.authorize("test").unwrap();
+    manager
+        .state_store
+        .put(
+            "stale",
+            PendingState {
+                provider: "test".to_string(),
+                pkce_verifier: None,
+                expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+            },
+        )
+        .await
+        .unwrap();
+    let (_, state) = manager.authorize("test").await.unwrap();
 
-    assert!(!manager.state_store.contains_key("stale"));
-    assert!(manager.state_store.contains_key(&state));
+    assert!(!manager.state_store.memory_contains("stale"));
+    assert!(manager.state_store.memory_contains(&state));
+}
+
+/// The DB store is single use even across two managers sharing the database:
+/// the state is removed before validation, so the second callback cannot win.
+#[tokio::test]
+async fn db_states_are_single_use() {
+    let manager_config = config_with(provider_with_token_url(
+        "https://provider.example/token".to_string(),
+    ));
+    let mut manager = OAuthManager::with_db(manager_config, memory_db().await).unwrap();
+
+    let (_, state) = manager.authorize("test").await.unwrap();
+    manager
+        .take_pending("test", &state)
+        .await
+        .expect("the first callback wins");
+    let error = manager
+        .take_pending("test", &state)
+        .await
+        .expect_err("the second callback must lose");
+    assert!(matches!(
+        error,
+        Error::Auth(ferris_core::AuthError::TokenInvalid(_))
+    ));
+}
+
+/// An expired DB row is refused as expired and removed, so a retry is invalid.
+#[tokio::test]
+async fn expired_db_states_are_refused_and_removed() {
+    let manager_config = config_with(provider_with_token_url(
+        "https://provider.example/token".to_string(),
+    ));
+    let mut manager = OAuthManager::with_db(manager_config, memory_db().await).unwrap();
+    manager
+        .state_store
+        .put(
+            "expired",
+            PendingState {
+                provider: "test".to_string(),
+                pkce_verifier: None,
+                expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = manager
+        .take_pending("test", "expired")
+        .await
+        .expect_err("an expired state is refused");
+    assert!(matches!(
+        error,
+        Error::Auth(ferris_core::AuthError::TokenExpired)
+    ));
+    let error = manager
+        .take_pending("test", "expired")
+        .await
+        .expect_err("the row is gone after the refusal");
+    assert!(matches!(
+        error,
+        Error::Auth(ferris_core::AuthError::TokenInvalid(_))
+    ));
+}
+
+/// `cleanup_states` sweeps the DB too, not just the process-local map.
+#[tokio::test]
+async fn cleanup_sweeps_expired_db_states() {
+    let manager_config = config_with(provider_with_token_url(
+        "https://provider.example/token".to_string(),
+    ));
+    let mut manager = OAuthManager::with_db(manager_config, memory_db().await).unwrap();
+    manager
+        .state_store
+        .put(
+            "stale",
+            PendingState {
+                provider: "test".to_string(),
+                pkce_verifier: None,
+                expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    manager.cleanup_states().await.expect("the sweep succeeds");
+    let error = manager
+        .take_pending("test", "stale")
+        .await
+        .expect_err("the swept row is gone");
+    assert!(matches!(
+        error,
+        Error::Auth(ferris_core::AuthError::TokenInvalid(_))
+    ));
+}
+
+/// Cross-replica: the state minted by one manager is redeemable by another
+/// manager over the same database — that is the whole point of the DB store.
+#[tokio::test]
+async fn a_second_manager_over_the_same_db_sees_the_state() {
+    let db = memory_db().await;
+    let manager_config = config_with(provider_with_token_url(
+        "https://provider.example/token".to_string(),
+    ));
+    let mut first = OAuthManager::with_db(manager_config.clone(), db.clone()).unwrap();
+    let mut second = OAuthManager::with_db(manager_config, db).unwrap();
+
+    let (_, state) = first.authorize("test").await.unwrap();
+    second
+        .take_pending("test", &state)
+        .await
+        .expect("the replica that did not mint the state can redeem it");
+
+    let error = first
+        .take_pending("test", &state)
+        .await
+        .expect_err("but only once, across replicas");
+    assert!(matches!(
+        error,
+        Error::Auth(ferris_core::AuthError::TokenInvalid(_))
+    ));
+}
+
+/// The manager lock must not be held across the token exchange: a slow provider
+/// answering after 500 ms cannot stop another request from taking the lock
+/// (which is what `list_providers`/`authorize` do in the router).
+#[tokio::test]
+async fn a_slow_exchange_does_not_hold_the_manager_lock() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(500))
+                .set_body_json(serde_json::json!({
+                    "access_token": "slow-access",
+                    "token_type": "Bearer",
+                    "expires_in": 600
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let manager = Arc::new(Mutex::new(
+        OAuthManager::new(config_with(provider_with_token_url(format!(
+            "{}/token",
+            server.uri()
+        ))))
+        .unwrap(),
+    ));
+    let state = {
+        let mut manager = manager.lock().await;
+        let (_, state) = manager.authorize("test").await.unwrap();
+        state
+    };
+    // The lock is released here, exactly as the router does it.
+    let (client, verifier) = {
+        let mut manager = manager.lock().await;
+        manager.take_pending("test", &state).await.unwrap()
+    };
+    let exchange =
+        tokio::spawn(async move { client.exchange_code("code".to_string(), verifier).await });
+
+    let guard = tokio::time::timeout(Duration::from_millis(100), manager.lock())
+        .await
+        .expect("the manager lock must be free while the exchange is in flight");
+    assert_eq!(guard.list_providers(), vec!["test".to_string()]);
+    drop(guard);
+
+    let tokens = exchange
+        .await
+        .expect("the exchange task joins")
+        .expect("the exchange succeeds");
+    assert_eq!(tokens.access_token, "slow-access");
+}
+
+/// `OpenID Connect` is not implemented; a provider that declares it is a config
+/// error instead of a login that silently ignores an unvalidated `id_token`.
+#[test]
+fn an_oidc_provider_is_refused_at_construction() {
+    let mut provider = provider_with_token_url("https://provider.example/token".to_string());
+    provider.oidc = true;
+    let result = OAuthManager::new(config_with(provider));
+    assert!(matches!(
+        result,
+        Err(Error::Config(ferris_core::ConfigError::Invalid { .. }))
+    ));
+}
+
+/// The store binds the first subject it sees, accepts the same one again, and
+/// refuses a different one without overwriting the binding. A second store over
+/// the same database sees the same binding (it is a column, not a map).
+#[tokio::test]
+async fn oauth_subject_binds_once_and_refuses_a_different_identity() {
+    let db = memory_db().await;
+    let store = crate::UserStore::new(db);
+    store.init().await.unwrap();
+    let user = store
+        .create(
+            "oauth-subject@local",
+            "OAuth Subject",
+            None,
+            crate::UserType::SystemUser,
+            "",
+            &["User".to_string()],
+        )
+        .await
+        .unwrap();
+
+    assert!(store.oauth_subject(&user.id).await.unwrap().is_none());
+    assert!(store.bind_oauth_subject(&user.id, "sub-a").await.unwrap());
+    assert_eq!(
+        store.oauth_subject(&user.id).await.unwrap().as_deref(),
+        Some("sub-a")
+    );
+    // Idempotent for the same identity, refused for another one.
+    assert!(store.bind_oauth_subject(&user.id, "sub-a").await.unwrap());
+    assert!(!store.bind_oauth_subject(&user.id, "sub-b").await.unwrap());
+    assert_eq!(
+        store.oauth_subject(&user.id).await.unwrap().as_deref(),
+        Some("sub-a"),
+        "the existing binding must not be overwritten"
+    );
+
+    let other = crate::UserStore::new(store.db().clone());
+    assert!(!other.bind_oauth_subject(&user.id, "sub-b").await.unwrap());
+    assert!(other.bind_oauth_subject(&user.id, "sub-a").await.unwrap());
+
+    // The administrative setter can clear it; the next login may bind again.
+    store.set_oauth_subject(&user.id, None).await.unwrap();
+    assert!(store.oauth_subject(&user.id).await.unwrap().is_none());
+    assert!(store.bind_oauth_subject(&user.id, "sub-b").await.unwrap());
 }
 
 /// AUTH1: `refresh_token` must perform the real RFC 6749 §6 exchange, not

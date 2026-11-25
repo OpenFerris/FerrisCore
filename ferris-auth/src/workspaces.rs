@@ -78,11 +78,12 @@ mod tests {
             item.collect_doctypes(&mut linked);
         }
         let metas = crate::doctypes::doctype_metas();
-        // `Has Role` is a child table: the crate declares and registers it, but a
-        // child table has no list view of its own, so it is never a sidebar link.
-        // The same goes for `hidden` infrastructure tables (`DocPerm`, `Session`):
-        // `ferris-api` keeps hidden DocTypes out of the workspace tree, so they are
-        // reached through their stores, not a sidebar link.
+        // `Has Role` is a child table: the crate declares and registers it as the
+        // `Workspace.roles` target, but it grants nothing and a child table has no
+        // list view of its own, so it is never a sidebar link. The same goes for
+        // `hidden` infrastructure tables (`DocPerm`): `ferris-api` keeps hidden
+        // DocTypes out of the workspace tree, so they are reached through their
+        // stores, not a sidebar link.
         let mut expected: Vec<&str> = metas
             .iter()
             .filter(|meta| !meta.is_child_table && !meta.hidden)
@@ -91,5 +92,27 @@ mod tests {
         linked.sort_unstable();
         expected.sort_unstable();
         assert_eq!(linked, expected);
+    }
+
+    /// `Access Log` is live: `ferris-files` emits `AuditEvent::FileAccess` and the
+    /// host's observability sink writes the row, so removing it from the sidebar
+    /// or the catalogue would break a writer outside this crate.
+    #[test]
+    fn access_log_stays_linked_because_the_host_writes_it() {
+        let ws = users_workspace();
+        let mut linked = Vec::new();
+        for item in &ws.items {
+            item.collect_doctypes(&mut linked);
+        }
+        assert!(
+            linked.contains(&"Access Log"),
+            "Access Log has a host writer and must stay in the Users workspace"
+        );
+        assert!(
+            crate::doctypes::doctype_metas()
+                .iter()
+                .any(|meta| meta.name == "Access Log"),
+            "the declaration the host writer targets must stay registered"
+        );
     }
 }

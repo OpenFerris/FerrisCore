@@ -65,10 +65,14 @@ pub(crate) async fn ensure_version_table(db: &ferris_db::Db) -> Result<()> {
 
 /// Record one version row for `(doctype, docname)` inside `sink`.
 ///
-/// The row is written by [`write_version`], the single writer used by both the
-/// engine and the version manager, so numbering and the `hash`/`prev_hash` chain
-/// are computed once. `changed_at` is taken here, on the same connection,
+/// The row is written by [`write_version_row`], the single writer used by both
+/// the engine and the version manager, so numbering and the `hash`/`prev_hash`
+/// chain are computed once. `changed_at` is taken here, on the same connection,
 /// together with the row it describes.
+///
+/// The engine path borrows the document: the snapshot is serialized straight
+/// from it, so a save does not deep-clone every field and child array just to
+/// hand the map to a row writer that hashes it and drops it.
 pub(crate) async fn record_version_in_tx(
     sink: &mut WriteSink<'_>,
     doctype: &str,
@@ -84,12 +88,12 @@ pub(crate) async fn record_version_in_tx(
             "document version data must be an object".to_string(),
         )));
     };
-    write_version(
+    write_version_row(
         sink,
         doctype,
         docname,
-        fields.clone(),
-        VersionMeta {
+        fields,
+        &VersionMeta {
             changed_by,
             changed_at: Utc::now(),
             change_type,
@@ -111,67 +115,64 @@ pub(crate) struct VersionMeta<'a> {
     pub(crate) comment: Option<String>,
 }
 
+/// A version row that was written: its number and its position in the chain.
+///
+/// The snapshot itself is not echoed back. The engine records history on every
+/// save and never reads it back from here, so returning a [`DocumentVersion`]
+/// would clone the document it just serialized.
+pub(crate) struct VersionStamp {
+    pub(crate) version: u32,
+    pub(crate) hash: String,
+    pub(crate) prev_hash: String,
+}
+
 /// Insert one `tab_version` row on `sink`'s connection, chained to its
 /// predecessor.
 ///
 /// The only writer of the table: [`record_version_in_tx`] calls it inside the
-/// document's transaction and [`crate::versioning::VersionManager`] opens its own
-/// for the restore/import paths. The next number is `MAX + 1` read on the same
-/// connection, so a rolled-back write does not burn a number, and the hash covers
+/// document's transaction and [`write_version`] wraps it for
+/// [`crate::versioning::VersionManager`]. One query reads the tip of the chain
+/// (number and hash together — the table's primary key is
+/// `(doctype, docname, version)`, so it is an index lookup), and the hash covers
 /// exactly the text stored in `data` plus the previous row's hash.
 #[allow(clippy::result_large_err)] // the crate-wide `Error` type is intentionally unchanged
-pub(crate) async fn write_version(
+pub(crate) async fn write_version_row(
     sink: &mut WriteSink<'_>,
     doctype: &str,
     docname: &str,
-    data: HashMap<String, Value>,
-    meta: VersionMeta<'_>,
-) -> Result<DocumentVersion> {
-    let row = sink
-        .fetch_one(&Stmt::new(
+    data: &HashMap<String, Value>,
+    meta: &VersionMeta<'_>,
+) -> Result<VersionStamp> {
+    let tip = sink
+        .fetch_optional(&Stmt::new(
             format!(
-                "SELECT COALESCE(MAX(version), 0) + 1 AS next FROM {TAB_VERSION} \
-                 WHERE doctype = ? AND docname = ?"
+                "SELECT version, hash FROM {TAB_VERSION} \
+                 WHERE doctype = ? AND docname = ? ORDER BY version DESC LIMIT 1"
             ),
             vec![Value::from(doctype), Value::from(docname)],
         ))
         .await?;
-    let version_num = row.i64("next")?.max(1);
-    let prev_hash = if version_num <= 1 {
+    let (version_num, prev_hash) = match &tip {
+        Some(row) => (
+            // DOC15: saturate instead of wrapping a huge counter value.
+            row.i64("version")?.saturating_add(1).max(1),
+            row.opt_str("hash").unwrap_or_default(),
+        ),
         // The first version anchors the chain; it has nothing to point at.
-        String::new()
-    } else {
-        sink.fetch_optional(&Stmt::new(
-            format!(
-                "SELECT hash FROM {TAB_VERSION} \
-                 WHERE doctype = ? AND docname = ? AND version = ?"
-            ),
-            vec![
-                Value::from(doctype),
-                Value::from(docname),
-                Value::from(version_num - 1),
-            ],
-        ))
-        .await?
-        .and_then(|previous| previous.opt_str("hash"))
-        .unwrap_or_default()
+        None => (1, String::new()),
     };
-
-    let data_json = canonical_data(&data)?;
-    let mut version = DocumentVersion {
-        // DOC15: saturate instead of wrapping a huge counter value.
-        version: u32::try_from(version_num).unwrap_or(u32::MAX),
-        doctype: doctype.to_string(),
-        docname: docname.to_string(),
-        data,
-        changed_by: meta.changed_by.to_string(),
-        changed_at: meta.changed_at,
-        change_type: meta.change_type,
-        comment: meta.comment,
-        hash: String::new(),
-        prev_hash,
-    };
-    version.hash = version_hash(&version, &data_json);
+    let version = u32::try_from(version_num).unwrap_or(u32::MAX);
+    let data_json = canonical_data(data)?;
+    let hash = version_hash_parts(
+        &prev_hash,
+        doctype,
+        docname,
+        version,
+        &data_json,
+        meta.changed_by,
+        meta.changed_at,
+        meta.change_type,
+    );
 
     sink.execute(&Stmt::new(
         format!(
@@ -181,21 +182,50 @@ pub(crate) async fn write_version(
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ),
         vec![
-            Value::from(version.doctype.as_str()),
-            Value::from(version.docname.as_str()),
+            Value::from(doctype),
+            Value::from(docname),
             Value::from(version_num),
             // The exact text the hash covers, stored as the JSON blob.
             Value::from(data_json.as_str()),
-            Value::from(version.changed_by.as_str()),
-            Value::from(version.changed_at.to_rfc3339()),
-            Value::from(change_type_json(version.change_type)),
-            version.comment.as_deref().map_or(Value::Null, Value::from),
-            Value::from(version.hash.as_str()),
-            Value::from(version.prev_hash.as_str()),
+            Value::from(meta.changed_by),
+            Value::from(meta.changed_at.to_rfc3339()),
+            Value::from(change_type_json(meta.change_type)),
+            meta.comment.as_deref().map_or(Value::Null, Value::from),
+            Value::from(hash.as_str()),
+            Value::from(prev_hash.as_str()),
         ],
     ))
     .await?;
-    Ok(version)
+    Ok(VersionStamp {
+        version,
+        hash,
+        prev_hash,
+    })
+}
+
+/// [`write_version_row`] for a caller that wants the full [`DocumentVersion`]
+/// back. The manager runs outside the engine's hot path, so it owns the map and
+/// can take it back after the row is written.
+pub(crate) async fn write_version(
+    sink: &mut WriteSink<'_>,
+    doctype: &str,
+    docname: &str,
+    data: HashMap<String, Value>,
+    meta: VersionMeta<'_>,
+) -> Result<DocumentVersion> {
+    let stamp = write_version_row(sink, doctype, docname, &data, &meta).await?;
+    Ok(DocumentVersion {
+        version: stamp.version,
+        doctype: doctype.to_string(),
+        docname: docname.to_string(),
+        data,
+        changed_by: meta.changed_by.to_string(),
+        changed_at: meta.changed_at,
+        change_type: meta.change_type,
+        comment: meta.comment,
+        hash: stamp.hash,
+        prev_hash: stamp.prev_hash,
+    })
 }
 
 /// The canonical JSON text a version stores and hashes.
@@ -218,16 +248,34 @@ pub(crate) fn canonical_data(data: &HashMap<String, Value>) -> Result<String> {
 /// always supplies the same fields, and `version`, `data` and `changed_at` are
 /// the stored spellings, so a read-back recomputes the identical input.
 pub(crate) fn version_hash(version: &DocumentVersion, data_json: &str) -> String {
-    ferris_db::exec::sha256_hex(&format!(
-        "{}{}{}{}{}{}{}{}",
-        version.prev_hash,
-        version.doctype,
-        version.docname,
+    version_hash_parts(
+        &version.prev_hash,
+        &version.doctype,
+        &version.docname,
         version.version,
         data_json,
-        version.changed_by,
-        version.changed_at.to_rfc3339(),
-        change_type_json(version.change_type),
+        &version.changed_by,
+        version.changed_at,
+        version.change_type,
+    )
+}
+
+/// [`version_hash`] over the parts, for a writer that hashes a row before it
+/// builds a [`DocumentVersion`].
+fn version_hash_parts(
+    prev_hash: &str,
+    doctype: &str,
+    docname: &str,
+    version: u32,
+    data_json: &str,
+    changed_by: &str,
+    changed_at: DateTime<Utc>,
+    change_type: ChangeType,
+) -> String {
+    ferris_db::exec::sha256_hex(&format!(
+        "{prev_hash}{doctype}{docname}{version}{data_json}{changed_by}{}{}",
+        changed_at.to_rfc3339(),
+        change_type_json(change_type),
     ))
 }
 

@@ -6,9 +6,8 @@ use ferris_core::permissions::Permission;
 use ferris_core::permissions::ReadScope;
 use ferris_core::{DocumentError, Error, Result, ValidationError, Value};
 use ferris_db::Db;
-use ferris_schema::DoctypeMeta;
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::RwLock;
 
 impl DocumentEngine {
     /// The document engine over `db`.
@@ -18,10 +17,8 @@ impl DocumentEngine {
     /// cached process-wide per database), so a caller never has to know whether
     /// a site ran the side-table migration.
     pub fn new(db: Db) -> Self {
-        Self {
-            db,
-            ensured: Arc::new(OnceLock::new()),
-        }
+        let ensured = ensured_for(db.id());
+        Self { db, ensured }
     }
 
     /// The backing database, for callers that need the same connection.
@@ -34,7 +31,22 @@ impl DocumentEngine {
     }
 
     /// Create the table for `doctype` if needed (cached per process).
+    ///
+    /// The columns are resolved from the **effective** metadata, so a custom
+    /// field gets a real column even though it is not in the compiled
+    /// declaration. A `DocType` with no registry entry only gets the system
+    /// columns, which keeps ad-hoc test names working.
     pub async fn ensure_table(&self, doctype: &str) -> Result<String> {
+        self.ensure_table_with(doctype, None).await
+    }
+
+    /// [`Self::ensure_table`] with the caller's metadata as a fallback when the
+    /// registry has no entry for `doctype`.
+    pub async fn ensure_table_with(
+        &self,
+        doctype: &str,
+        fallback: Option<&DoctypeMeta>,
+    ) -> Result<String> {
         let table = table_name(doctype)?;
         if self
             .ensured_tables()
@@ -44,69 +56,79 @@ impl DocumentEngine {
         {
             return Ok(table);
         }
+        let dialect = self.db.dialect();
+        let shape = DocShape::resolve(&self.db, doctype, dialect, fallback).await?;
         // The shared definition, so a lazily-created table and a migrated one
         // are the same table. `ensure_table` is already `IF NOT EXISTS`, so this
         // is a no-op when the migration already ran.
         self.db
             .ensure_table(&table, &ferris_schema::migration::document_columns())
             .await?;
-        for (name, columns, unique) in ferris_schema::migration::document_indexes() {
-            self.db.ensure_index(name, &table, columns, unique).await?;
+        // A table created before these columns existed gains them nullable.
+        for name in ["modified_by", "amended_from", "workflow_state"] {
+            self.db
+                .ensure_column(&table, &ferris_db::sql::Column::new(name, "VARCHAR(255)"))
+                .await?;
         }
-        // The DocType's own `meta.indexes` joined the DDL in
-        // [`ferris_schema::migration::create_table_statements`], so the lazy
-        // path has to materialize the same declarations or a table created here
-        // and one created by `ferris migrate` stop being the same table. The
-        // migration runner sees `meta.indexes` from the in-process registry, so
-        // this looks the same declaration up there; both DDL paths classify an
-        // entry identically and both ensures are idempotent, so running them
-        // after a migration is a no-op. A DocType with no registered metadata
-        // (a test, a runtime name) declares no indexes, which is the status quo.
-        if let Some(meta) = ferris_schema::get_doctype(doctype) {
-            for index in &meta.indexes {
-                match ferris_schema::migration::classify_index(index) {
-                    ferris_schema::migration::DeclaredIndex::Columns => {
-                        let columns: Vec<&str> = index.fields.iter().map(String::as_str).collect();
-                        self.db
-                            .ensure_index(&index.name, &table, &columns, index.unique)
-                            .await?;
-                    }
-                    ferris_schema::migration::DeclaredIndex::JsonField(field) => {
-                        // A blob field has no column; its index is over the JSON
-                        // expression, which is also the expression `list` pushes
-                        // filters and ordering into — the two are the same
-                        // `json_field_target` spelling by construction.
-                        self.db
-                            .ensure_json_index(&index.name, &table, field, index.unique)
-                            .await?;
-                    }
-                    ferris_schema::migration::DeclaredIndex::Unsupported => {}
+        if let Some(meta) = &shape.meta {
+            // Declared fields get a real column. A fresh table gets them from
+            // the generator below; an existing one receives them here as
+            // nullable `ALTER TABLE ... ADD COLUMN`.
+            for field in &shape.columns {
+                if let Some(column) = nullable_column(field, dialect)? {
+                    self.db.ensure_column(&table, &column).await?;
                 }
             }
-            // `FieldMeta::unique` is a constraint, not only migration DDL: a
-            // table created lazily must get the same unique index the migration
-            // path builds, or the first write to a fresh install can duplicate
-            // a business key (LOGIC-01).
-            for field in &meta.fields {
-                if !field.unique
-                    || field.r#virtual
-                    || ferris_schema::fieldtype::is_layout(&field.fieldtype)
-                {
-                    continue;
-                }
-                let name = format!("{}_unique", field.fieldname);
-                let column = ferris_schema::migration::document_columns()
-                    .iter()
-                    .any(|column| column.name == field.fieldname);
-                if column {
+            // The generator owns the parent table, the child tables, the
+            // declared/unique/search indexes and `document_indexes`.
+            for sql in ferris_schema::doctype_columns::create_doc_type_statements(meta, dialect)? {
+                self.db.execute_script_tolerant(&sql).await?;
+            }
+            // Custom fields on a child DocType are not in the compiled child
+            // declaration, so the effective child shape adds its columns and
+            // link columns to an existing child table.
+            for child in &shape.tables {
+                let child_table = table_name(&child.child)?;
+                for (name, ty) in [
+                    ("parent", "VARCHAR(255)"),
+                    ("parenttype", "VARCHAR(255)"),
+                    ("parentfield", "VARCHAR(255)"),
+                    ("idx", "BIGINT"),
+                ] {
                     self.db
-                        .ensure_index(&name, &table, &[&field.fieldname], true)
-                        .await?;
-                } else {
-                    self.db
-                        .ensure_json_index(&name, &table, &field.fieldname, true)
+                        .ensure_column(&child_table, &ferris_db::sql::Column::new(name, ty))
                         .await?;
                 }
+                for field in &child.columns {
+                    if let Some(column) = nullable_column(field, dialect)? {
+                        self.db.ensure_column(&child_table, &column).await?;
+                    }
+                }
+                self.db
+                    .ensure_index(
+                        "parent",
+                        &child_table,
+                        &["parent", "parentfield", "idx"],
+                        false,
+                    )
+                    .await?;
+            }
+            // The full-text index is global, not per DocType: it is created
+            // with the first DocType that has metadata. A database whose build
+            // lacks FTS5 fails here and list search keeps the Rust fallback;
+            // that is a warning, never a boot failure.
+            if let Err(error) = search::ensure(&self.db).await {
+                tracing::warn!(
+                    %error,
+                    doctype,
+                    "full-text search index unavailable; list search falls back to the Rust scan"
+                );
+            }
+        } else {
+            // A DocType with no registered metadata (a test or a runtime name)
+            // still gets the standard indexes on the system columns.
+            for (name, columns, unique) in ferris_schema::migration::document_indexes() {
+                self.db.ensure_index(name, &table, columns, unique).await?;
             }
         }
         self.ensured_tables()
@@ -114,6 +136,35 @@ impl DocumentEngine {
             .unwrap_or_else(|e| e.into_inner())
             .insert(table.clone());
         Ok(table)
+    }
+
+    /// Re-run the schema for `doctype` after its metadata changed.
+    ///
+    /// `ensure_table` caches the tables it has ensured per database, so a
+    /// runtime `DocType` edit that adds a field would otherwise reuse the
+    /// stale cache and never execute the `ALTER TABLE`. This drops the cache
+    /// entry first and then ensures the table again.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`Self::ensure_table`].
+    pub async fn refresh_table(&self, doctype: &str) -> Result<String> {
+        let table = table_name(doctype)?;
+        self.ensured_tables()
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&table);
+        self.ensure_table(doctype).await
+    }
+
+    /// Rebuild the full-text index for one `DocType`.
+    ///
+    /// # Errors
+    ///
+    /// The search backend is unavailable (FTS5 not compiled in) or a row cannot
+    /// be read/indexed.
+    pub async fn reindex_search(&self, doctype: &str) -> Result<usize> {
+        super::search::rebuild(&self.db, doctype).await
     }
 
     /// Read a row **without any authorization**.
@@ -125,17 +176,23 @@ impl DocumentEngine {
     /// `Submit` — and must not be re-gated on `Read` first, or a principal
     /// granted `Write` without `Read` would be unable to save.
     ///
-    /// Returns the document together with the `owner` **column**. The column,
-    /// not the `owner` key inside the `data` blob, is the authoritative owner:
-    /// nothing in a request body can write a column directly, which is the same
-    /// reason C1's fix refuses to trust the payload.
+    /// Returns the document together with the `owner` **column**. The column is
+    /// the authoritative owner: nothing in a request body can write a column
+    /// directly, which is the same reason C1's fix refuses to trust the payload.
     pub(super) async fn read_row(
         &self,
-        doctype: &str,
+        ctx: &EngineContext<'_>,
         name: &str,
     ) -> Result<(Value, Option<String>)> {
-        self.ensure_table(doctype).await?;
-        read_row_via(&mut WriteSink::Db(&self.db), doctype, name).await
+        self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
+        read_row_via(
+            &mut WriteSink::Db(&self.db),
+            &self.db,
+            &ctx.doctype,
+            name,
+            ctx.meta,
+        )
+        .await
     }
 
     /// Fetch a document by name, authorized as `ctx.user`.
@@ -179,7 +236,7 @@ impl DocumentEngine {
             })?;
             return virtual_read(ctx, provider.get(ctx, name)?);
         }
-        let (value, owner) = self.read_row(&ctx.doctype, name).await?;
+        let (value, owner) = self.read_row(ctx, name).await?;
         self.ensure_runtime_tables().await?;
         self.authorize(ctx, name, authz_owner(ctx, owner.as_deref()), action)
             .await?;
@@ -221,7 +278,7 @@ impl DocumentEngine {
         // framework write on that identity's behalf (DOC-01).
         require_authenticated(ctx, &ctx.doctype, Permission::Read)?;
         let name = ctx.doctype.clone();
-        match self.read_row(&ctx.doctype, &name).await {
+        match self.read_row(ctx, &name).await {
             Ok((value, owner)) => {
                 self.ensure_runtime_tables().await?;
                 self.authorize(
@@ -274,7 +331,7 @@ impl DocumentEngine {
         // before the create-vs-update branch (DOC-01).
         require_authenticated(ctx, &ctx.doctype, Permission::Create)?;
         let name = ctx.doctype.clone();
-        match self.read_row(&ctx.doctype, &name).await {
+        match self.read_row(ctx, &name).await {
             Ok(_) => self.update(ctx, &name, data).await,
             Err(Error::Document(DocumentError::NotFound { .. })) => {
                 // Creating a Single is still a create: it must be authorized as
@@ -310,8 +367,7 @@ impl DocumentEngine {
     /// same agreement differently: `DatabaseQuery.execute()` folds the permission
     /// condition into the SQL (`add_user_permissions` /
     /// `get_permission_query_conditions`) so it never has a fallback — it has
-    /// real columns for every field, which is the difference
-    /// `ferris-schema/src/migration.rs:41-50` makes for a blob-backed store.
+    /// real columns for every field, and so does this store (ADR 0001).
     pub async fn list(
         &self,
         ctx: &EngineContext<'_>,
@@ -337,7 +393,7 @@ impl DocumentEngine {
             return Ok((documents, total));
         }
         let doctype = ctx.doctype.as_str();
-        let table = self.ensure_table(doctype).await?;
+        let table = self.ensure_table_with(doctype, ctx.meta).await?;
         let dialect = self.db.dialect();
 
         let scope = match ctx.user.as_ref() {
@@ -350,8 +406,8 @@ impl DocumentEngine {
         };
 
         // FRA-03: with a `User Permission` installed every row is a function of
-        // its own `Link` values, which SQL cannot express (the fields live in
-        // the JSON blob). `read_scope` already answers `PerRow`; this keeps the
+        // its own `Link` values, which the planner cannot fold into the query
+        // generically. `read_scope` already answers `PerRow`; this keeps the
         // "SQL may not page it" guarantee independent of the policy
         // classification, so `LIMIT` can never shorten the page or inflate
         // `total` with rows the caller cannot read.
@@ -362,9 +418,15 @@ impl DocumentEngine {
         // Documents the caller may read only because of a share (DOC8): the role
         // scope in `plan`/`can_read` does not know about `tab_share`, so a shared
         // document would otherwise be missing from the caller's list. Loaded once
-        // per page — a set of names, not a query per row.
+        // per page — a set of names, not a query per row — and skipped entirely
+        // when the role scope already admits every row (`All`): a share only
+        // ever adds a row, and there is nothing to add.
         self.ensure_runtime_tables().await?;
-        let shared = self.readable_share_names(ctx).await?;
+        let shared = if scope == ReadScope::All {
+            HashSet::new()
+        } else {
+            self.readable_share_names(ctx).await?
+        };
         let scope = if scope == ReadScope::None && !shared.is_empty() {
             // No role policy grants a read at all, but a share does. Force the
             // per-row path, where `can_read` admits the shared names by name.
@@ -376,25 +438,57 @@ impl DocumentEngine {
             return Ok((Vec::new(), 0));
         }
 
-        // The fields this DocType declares a single-field index over, which the
-        // plan may push into SQL. Prefer the context's metadata (the API layer
-        // hands over the customized one); fall back to the registry so callers
-        // that build a bare context (e.g. the plugin host) still get the
-        // pushdown for registered DocTypes. A DocType with no metadata just has
-        // no pushable fields, which is the previous behaviour.
-        let json_indexed_fields: Vec<String> = ctx
-            .meta
-            .map(DoctypeMeta::json_indexed_fields)
-            .or_else(|| ferris_schema::get_doctype(doctype).map(|m| m.json_indexed_fields()))
-            .unwrap_or_default();
+        // The declared fields that own a real column in this dialect, read from
+        // the effective metadata, so the plan can never name a column the table
+        // does not have and a custom field is pushable like a compiled one.
+        let shape = DocShape::resolve(&self.db, doctype, dialect, ctx.meta).await?;
+        let columns = &shape.columns;
+
+        // The full-text index answers `search` when it can. Only a DocType the
+        // registry knows is indexed (`ensure_table` runs the DDL and every write
+        // indexes it), so only that case may trust the index; a metadata-less
+        // runtime name keeps the Rust scan over the reconstructed document.
+        // Anything the index cannot answer (no FTS5, a term the backend
+        // rejects) stays in `params.search` and the Rust scan below applies it
+        // exactly as before. The resolved names arrive as `only_names`, the
+        // existing "a predicate decided elsewhere" channel, and intersect with
+        // whatever the caller already restricted.
+        let mut params = params.clone();
+        if shape.meta.is_some()
+            && let Some(term) = params
+                .search
+                .as_deref()
+                .map(str::trim)
+                .filter(|term| !term.is_empty())
+        {
+            match search::names(&self.db, doctype, term).await {
+                Ok(names) => {
+                    let names = match params.only_names.take() {
+                        Some(only) => names.intersection(&only).cloned().collect(),
+                        None => names,
+                    };
+                    params.only_names = Some(names);
+                    params.search = None;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        doctype,
+                        "full-text search index did not answer; keeping the Rust scan"
+                    );
+                }
+            }
+        }
+        let params = &params;
 
         let (mut plan, residual) = list_sql::Plan::build(
             &params.filters,
             &params.filter_ops,
             params.search.as_deref(),
             params.order_by.as_deref(),
-            &json_indexed_fields,
+            columns,
         );
+        let mut only_names_in_rust = false;
         if let Some(only) = &params.only_names {
             // A name set is a `name IN (...)`: the one predicate the engine's
             // callers use to hand it a decision reached elsewhere (see
@@ -404,7 +498,15 @@ impl DocumentEngine {
                 // emitting `IN ()`, which is a syntax error on every dialect.
                 return Ok((Vec::new(), 0));
             }
-            plan = plan.with_in("name", only.iter().cloned().collect())?;
+            // A broad FTS hit or an "only liked" set can exceed SQLite's
+            // variable ceiling. Keep the set for the Rust evaluator instead of
+            // emitting an `IN` the smallest backend rejects; the page/count
+            // path is then the non-exhaustive one, which is correct.
+            if only.len() <= 800 {
+                plan = plan.with_in("name", only.iter().cloned().collect())?;
+            } else {
+                only_names_in_rust = true;
+            }
         }
         match scope {
             // `All` needs no narrowing; `PerRow` must not be narrowed here,
@@ -437,7 +539,8 @@ impl DocumentEngine {
         let page_is_exhaustive = plan.is_complete()
             && scope != ReadScope::PerRow
             && shared.is_empty()
-            && !value_restricted;
+            && !value_restricted
+            && !only_names_in_rust;
 
         let (documents, total) = if page_is_exhaustive {
             let rows = self
@@ -449,29 +552,39 @@ impl DocumentEngine {
                 .fetch_one(&plan.count(&table, dialect)?)
                 .await?
                 .count("n");
-            let documents: Vec<Value> = rows
+            let mut documents = rows
                 .iter()
-                .filter_map(|row| {
-                    let data = row.str("data").ok()?;
-                    serde_json::from_str(&data).ok()
-                })
-                .collect();
+                .map(|row| shape.row_to_document(row))
+                .collect::<Result<Vec<_>>>()?;
+            read_children_batch(
+                &mut WriteSink::Db(&self.db),
+                &shape,
+                doctype,
+                &mut documents,
+            )
+            .await?;
             (documents, total)
         } else {
             let rows = self
                 .db
                 .fetch_all(&plan.select_all(&table, dialect)?)
                 .await?;
-            let mut documents: Vec<Value> = rows
-                .iter()
-                .filter_map(|row| {
-                    let owner = row.opt_str("owner");
-                    let owner = owner.as_deref();
-                    let data = row.str("data").ok()?;
-                    let value: Value = serde_json::from_str(&data).ok()?;
+            // The owner column feeds the per-row decision; it travels beside the
+            // document instead of inside it, so no value has to be cloned to
+            // hydrate the children first.
+            let mut values: Vec<Value> = Vec::with_capacity(rows.len());
+            let mut owners: Vec<Option<String>> = Vec::with_capacity(rows.len());
+            for row in &rows {
+                values.push(shape.row_to_document(row)?);
+                owners.push(row.opt_str("owner"));
+            }
+            read_children_batch(&mut WriteSink::Db(&self.db), &shape, doctype, &mut values).await?;
+            let mut documents: Vec<Value> = values
+                .into_iter()
+                .zip(owners)
+                .filter_map(|(value, owner)| {
                     // The resource identity the policy is evaluated against is the
-                    // row's own name. Read it from the document, which the engine
-                    // guarantees carries `name`.
+                    // row's own name, which the reconstruction always carries.
                     let doc_name = value
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -481,7 +594,7 @@ impl DocumentEngine {
                     // must not empty the whole page. A row the caller can only
                     // read through a share is admitted by name (DOC8).
                     if !shared.contains(&doc_name) {
-                        can_read(ctx, &doc_name, owner).ok()?;
+                        can_read(ctx, &doc_name, owner.as_deref()).ok()?;
                     }
                     // FRA-03: a `User Permission` narrows the rows even when the
                     // role/share decision admits them.
@@ -552,6 +665,7 @@ fn require_authenticated(ctx: &EngineContext<'_>, name: &str, action: Permission
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferris_schema::DoctypeMeta;
 
     fn single_meta() -> DoctypeMeta {
         DoctypeMeta {
@@ -688,41 +802,8 @@ mod tests {
     /// same two calls return both rows and the document.
     #[tokio::test]
     async fn a_user_permission_narrows_the_list_and_the_single_read() {
-        use ferris_core::permissions::{
-            UserPermissionRule, UserPermissionRules, UserPermissionSource,
-            clear_user_permission_source, set_user_permission_source,
-        };
-        use std::sync::Arc;
-
-        struct Static(Vec<UserPermissionRule>);
-        impl UserPermissionSource for Static {
-            fn rules_for(&self, user: &str) -> UserPermissionRules {
-                UserPermissionRules::from(
-                    self.0
-                        .iter()
-                        .filter(|rule| rule.user == user)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                )
-            }
-        }
-
-        static SERIALISE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        struct Installed {
-            _guard: std::sync::MutexGuard<'static, ()>,
-        }
-        impl Drop for Installed {
-            fn drop(&mut self) {
-                clear_user_permission_source();
-            }
-        }
-        fn install(rules: Vec<UserPermissionRule>) -> Installed {
-            let guard = SERIALISE
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            set_user_permission_source(Arc::new(Static(rules)));
-            Installed { _guard: guard }
-        }
+        use crate::engine::tests::user_permission_source::install;
+        use ferris_core::permissions::UserPermissionRule;
 
         let meta = DoctypeMeta {
             name: "D1Customer".to_string(),

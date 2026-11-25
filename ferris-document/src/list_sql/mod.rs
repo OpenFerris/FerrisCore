@@ -12,31 +12,24 @@
 //! Frappe does not have this problem because its fields are columns
 //! (`frappe/model/db_query.py::DatabaseQuery.execute` composes `add_user_permissions`
 //! and `get_permission_query_conditions` into the SQL and applies
-//! `limit_page_length` there). Ferris stores the document as one JSON blob
-//! (`ferris-schema/src/migration.rs:41-50`), so most predicates cannot be
-//! expressed in SQL at all.
+//! `limit_page_length` there). Ferris now stores every declared field in a real
+//! column too (ADR 0001), so most predicates *can* be expressed in SQL.
 //!
 //! # What this module does about that
 //!
 //! It splits the work by what the storage layer can actually answer:
 //!
-//! - **Column fields** — `name`, `owner`, `docstatus`, `creation`, `modified`.
-//!   These are real, indexed columns ([`document_indexes`]). Filters, ordering
-//!   and pagination over them are pushed down to SQL, which is where an index
-//!   can be used.
-//! - **Indexed blob fields** — a document field a DocType declares through a
-//!   single-field `meta.indexes` entry. Because the declaration is a promise
-//!   that an index over `data.field` exists (materialized by
-//!   [`ferris_schema::migration::classify_index`] and
-//!   [`ferris_db::sql::ensure_json_index`]), an **exact** filter — `=` and
-//!   `in` — over such a field is pushed down as `json_extract(data,
-//!   '$.field') = ?` (or the dialect's spelling), so the database can serve it
-//!   from that index instead of scanning. Ranges and `LIKE` over an indexed
-//!   field stay in Rust: the Rust comparator is numeric-when-both-parse and
-//!   case-insensitive otherwise, and SQL text comparison would return
-//!   different rows, which this module refuses to do.
-//! - **Everything else** — living inside the `data` JSON without an index.
-//!   These stay in Rust, and [`Plan::residual`] says so.
+//! - **Column fields** — `name`, `owner`, `docstatus`, `creation`, `modified`,
+//!   `modified_by`, `amended_from`, `workflow_state`, plus every declared field
+//!   that owns a real column (`ferris_schema::doctype_columns`). These are
+//!   real, indexed columns ([`document_indexes`]). Filters, ordering and
+//!   pagination over them are pushed down to SQL, which is where an index can
+//!   be used. A declared field's value is bound with its column type
+//!   (`BIGINT`, `DOUBLE`, `BOOLEAN` or text), and a value that cannot be
+//!   coerced stays in Rust rather than being bound to the wrong domain.
+//! - **Everything else** — a field with no column (layout, virtual, a child
+//!   table) or a substring search. These stay in Rust over the reconstructed
+//!   document, and [`Plan::residual`] says so.
 //!
 //! The split is a **performance** boundary and never an **authorization** one.
 //! Permission filtering is computed by the caller (the engine's `can_read`) and
