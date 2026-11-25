@@ -422,7 +422,7 @@ impl DocumentEngine {
         write_children(sink, shape, &ctx.doctype, &tombstone.docname, &snapshot).await?;
         // The restored row is live again, so it must be findable again.
         if search::ready_for(&self.db, &ctx.doctype)
-            && let Err(error) = search::index(sink, &ctx.doctype, &snapshot).await
+            && let Err(error) = search::index(sink, &ctx.doctype, &snapshot, shape).await
         {
             tracing::warn!(
                 %error,

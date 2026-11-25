@@ -62,13 +62,13 @@ fn field_mask_allowed(ctx: &EngineContext<'_>, field: &FieldMeta) -> bool {
 }
 
 /// A `Password` fieldtype: hashed on write, masked on read.
-fn is_password_field(field: &FieldMeta) -> bool {
+pub(in crate::engine) fn is_password_field(field: &FieldMeta) -> bool {
     field.fieldtype == "Password"
 }
 
 /// A `Secret` fieldtype: encrypted on write, masked on read, recoverable by a
 /// trusted context through [`DocumentEngine::read_secret`].
-fn is_secret_field(field: &FieldMeta) -> bool {
+pub(in crate::engine) fn is_secret_field(field: &FieldMeta) -> bool {
     field.fieldtype == "Secret"
 }
 

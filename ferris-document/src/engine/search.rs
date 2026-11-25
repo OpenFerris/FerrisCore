@@ -109,12 +109,14 @@ pub(in crate::engine) async fn ensure(db: &Db) -> Result<()> {
 ///
 /// The caller must have checked [`ready`]. The body is every string leaf of the
 /// document (child arrays included, because they are part of the document),
-/// capped at [`BODY_LIMIT`].
+/// except the columns `shape` marks as credentials — a password hash or a
+/// secret is not searchable text — capped at [`BODY_LIMIT`].
 #[allow(clippy::result_large_err)] // crate-wide `Error`; boxing it would leak into every caller
 pub(in crate::engine) async fn index(
     sink: &mut WriteSink<'_>,
     doctype: &str,
     document: &Value,
+    shape: &DocShape,
 ) -> Result<()> {
     let Some(name) = document.get("name").and_then(Value::as_str) else {
         return Ok(());
@@ -122,7 +124,7 @@ pub(in crate::engine) async fn index(
     if name.is_empty() {
         return Ok(());
     }
-    let body = body_of(document);
+    let body = body_of(document, &shape.sensitive_fieldnames());
     for stmt in ferris_schema::search::upsert(sink.dialect(), doctype, name, &body) {
         sink.execute(&stmt).await?;
     }
@@ -168,7 +170,7 @@ pub(in crate::engine) async fn rebuild(db: &Db, doctype: &str) -> Result<usize> 
         let name = row.str("name")?;
         let (document, _) =
             read_row_with_shape_via(&mut WriteSink::Db(db), &shape, doctype, &name).await?;
-        index(&mut WriteSink::Db(db), doctype, &document).await?;
+        index(&mut WriteSink::Db(db), doctype, &document, &shape).await?;
         rebuilt += 1;
     }
     Ok(rebuilt)
@@ -200,13 +202,15 @@ pub(in crate::engine) async fn names(
 /// Newlines keep two adjacent fields from fusing into one token; array items
 /// (child rows) are walked like any other value. Non-strings carry no text and
 /// are skipped rather than stringified, so a number does not become a token.
-fn body_of(value: &Value) -> String {
+/// A key named in `sensitive` is skipped at any depth, because a credential
+/// column is never document text.
+fn body_of(value: &Value, sensitive: &std::collections::HashSet<&str>) -> String {
     let mut body = String::new();
-    collect(value, &mut body);
+    collect(value, &mut body, sensitive);
     body
 }
 
-fn collect(value: &Value, body: &mut String) {
+fn collect(value: &Value, body: &mut String, sensitive: &std::collections::HashSet<&str>) {
     if body.len() >= BODY_LIMIT {
         return;
     }
@@ -222,13 +226,16 @@ fn collect(value: &Value, body: &mut String) {
             body.push('\n');
         }
         Value::Object(map) => {
-            for value in map.values() {
-                collect(value, body);
+            for (key, value) in map {
+                if sensitive.contains(key.as_str()) {
+                    continue;
+                }
+                collect(value, body, sensitive);
             }
         }
         Value::Array(items) => {
             for value in items {
-                collect(value, body);
+                collect(value, body, sensitive);
             }
         }
         _ => {}
@@ -239,4 +246,27 @@ fn unavailable() -> Error {
     Error::Validation(ValidationError::Invalid(
         "the full-text search index is unavailable on this database".to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// A credential column never reaches the body, at any depth; ordinary text
+    /// still does.
+    #[test]
+    fn the_body_skips_sensitive_keys() {
+        let sensitive: HashSet<&str> = ["password", "token"].into_iter().collect();
+        let document = ferris_core::value!({
+            "title": "visible needle",
+            "password": "argon2-hash",
+            "items": [{ "label": "child needle", "token": "child-secret" }]
+        });
+        let body = body_of(&document, &sensitive);
+        assert!(body.contains("visible needle"));
+        assert!(body.contains("child needle"));
+        assert!(!body.contains("argon2-hash"), "{body}");
+        assert!(!body.contains("child-secret"), "{body}");
+    }
 }

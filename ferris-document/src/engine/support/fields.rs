@@ -92,7 +92,7 @@ pub(in crate::engine) async fn persist_written(
     // The child arrays travel with the document; replace their real rows in the
     // same transaction as the parent.
     write_children(sink, shape, doctype, name, document).await?;
-    if index_search && let Err(error) = search::index(sink, doctype, document).await {
+    if index_search && let Err(error) = search::index(sink, doctype, document, shape).await {
         // Best effort, like `insert_row`: the row is saved whatever the index
         // does, and the Rust scan still answers a search for it.
         tracing::warn!(

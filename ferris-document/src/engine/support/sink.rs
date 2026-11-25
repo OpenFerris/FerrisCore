@@ -243,7 +243,7 @@ pub(in crate::engine) async fn insert_row(
     let name = field_str(&fields, "name").unwrap_or_default();
     write_children(sink, shape, &ctx.doctype, &name, &document).await?;
     if prepared.index_search
-        && let Err(error) = search::index(sink, &ctx.doctype, &document).await
+        && let Err(error) = search::index(sink, &ctx.doctype, &document, shape).await
     {
         // The index is derived data: a document that was written stays written
         // even when it could not be indexed. The next list search simply misses

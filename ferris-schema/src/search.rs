@@ -1,10 +1,10 @@
 //! Per-engine full-text index behind `ListQuery::search`.
 //!
-//! The document engine stores every field in one JSON blob, so a search used to
-//! be a full table scan decoded in Rust. This module is the other half of the
-//! replacement: one global table, `_ferris_search`, with a `(doctype, name)`
-//! key and the document's text in `body`, indexed by whatever the backend
-//! offers natively.
+//! A document is stored as columns plus real child tables, so a search would be
+//! a full table scan projected and decoded in Rust. This module is the index
+//! that answers it instead: one global table, `_ferris_search`, with a
+//! `(doctype, name)` key and the document's text in `body`, indexed by whatever
+//! the backend offers natively.
 //!
 //! | Dialect | Table | Index | Match |
 //! |---|---|---|---|

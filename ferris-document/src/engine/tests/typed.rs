@@ -498,3 +498,55 @@ async fn bulk_create_shares_the_shape_and_writes_every_child_row() {
         );
     }
 }
+
+/// A fieldtype that carries a structured value must round-trip through its
+/// column with the same shape it was written with.
+///
+/// A `Geolocation` is a GeoJSON object and a `Signature` is an object; a
+/// multi-value link and an attachment gallery are arrays. The column holds their
+/// JSON text, and a read that returned that text as a string would break the
+/// fieldtype contract (the Desk renders an object, not its serialization).
+#[tokio::test]
+async fn structured_fieldtypes_round_trip_with_their_shape() {
+    let doctype = "TypedStructuredProbe";
+    ferris_schema::register_doctype(DoctypeMeta {
+        name: doctype.to_string(),
+        fields: vec![
+            field("title", "Data"),
+            field("point", "Geolocation"),
+            field("signature", "Signature"),
+        ],
+        ..Default::default()
+    });
+
+    let db = ferris_db::memory_db().await.unwrap();
+    let engine = DocumentEngine::new(db);
+    let ctx = EngineContext::new(doctype, "STR-.#####").allow_anonymous(true);
+    let created = engine
+        .create(
+            &ctx,
+            ferris_core::value!({
+                "title": "shapes",
+                "point": {
+                    "type": "Point",
+                    "coordinates": [13.4, 52.5]
+                },
+                "signature": "data:image/png;base64,AAAA"
+            }),
+        )
+        .await
+        .unwrap();
+    let name = created.get("name").and_then(Value::as_str).unwrap();
+
+    let fetched = engine.get(&ctx, name).await.unwrap();
+    assert!(
+        matches!(fetched.get("point"), Some(Value::Object(_))),
+        "Geolocation came back as {:?}",
+        fetched.get("point")
+    );
+    assert_eq!(
+        fetched.get("signature").and_then(Value::as_str),
+        Some("data:image/png;base64,AAAA"),
+        "a data URL signature is a string"
+    );
+}

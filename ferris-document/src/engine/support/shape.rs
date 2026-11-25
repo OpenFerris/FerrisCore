@@ -17,6 +17,7 @@
 //! runtime name without a declaration still works without inventing columns.
 
 use super::super::*;
+use super::{is_password_field, is_secret_field};
 use ferris_core::{Result, Value};
 use ferris_db::{Dialect, Row};
 use ferris_schema::{DoctypeMeta, FieldMeta};
@@ -117,6 +118,30 @@ impl DocShape {
             columns,
             tables,
         })
+    }
+
+    /// The fieldnames whose values are credentials, not document text.
+    ///
+    /// A stored password hash or an encrypted secret must not be copied into the
+    /// full-text index: searching them is never useful, they bloat the index on
+    /// every write, and a second table holding a credential is one more place to
+    /// leak it from. Child columns are included, because their values travel in
+    /// the same document.
+    pub(in crate::engine) fn sensitive_fieldnames(&self) -> std::collections::HashSet<&str> {
+        let mut names = std::collections::HashSet::new();
+        for field in &self.columns {
+            if is_password_field(field) || is_secret_field(field) {
+                names.insert(field.fieldname.as_str());
+            }
+        }
+        for table in &self.tables {
+            for field in &table.columns {
+                if is_password_field(field) || is_secret_field(field) {
+                    names.insert(field.fieldname.as_str());
+                }
+            }
+        }
+        names
     }
 
     /// The `SELECT` list that reconstructs one document.
@@ -306,6 +331,26 @@ pub(in crate::engine) fn column_to_value(field: &FieldMeta, row: &Row) -> Option
         "JSON" => row
             .opt_str(name)
             .and_then(|text| serde_json::from_str(&text).ok()),
+        // A `Geolocation` is either a GeoJSON object or a `"lat,lon"` string.
+        // The column keeps the object as JSON text; returning that text as a
+        // string would break the fieldtype contract the Desk renders.
+        "Geolocation" => row.opt_str(name).map(|text| json_object_or_string(&text)),
         _ => row.opt_str(name).map(Value::from),
     }
+}
+
+/// The JSON value `text` spells, when it is an object or an array; the text
+/// itself otherwise.
+///
+/// Only a structured document is restored: a plain string that happens to be
+/// valid JSON (a number, `true`, a quoted string) stays a string, so a link or a
+/// text value cannot change type on a round trip.
+fn json_object_or_string(text: &str) -> Value {
+    let trimmed = text.trim_start();
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && let Ok(parsed) = serde_json::from_str::<Value>(text)
+    {
+        return parsed;
+    }
+    Value::from(text)
 }

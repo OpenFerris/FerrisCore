@@ -163,3 +163,105 @@ async fn full_text_index_answers_search_and_tracks_writes() {
     let names = search_names(&engine, "needle").await;
     assert!(names.contains("unindexed"), "{names:?}");
 }
+
+/// The full-text body must carry document text, never credentials.
+///
+/// The index is written from the same document the row is built from, so a
+/// `Password` column (an Argon2 hash by then) and a `Secret` column (ciphertext)
+/// would land in `_ferris_search` unless the engine filters them by fieldtype.
+#[tokio::test]
+async fn credential_columns_are_not_indexed() {
+    const SECRET_DOCTYPE: &str = "FtsSecretProbe";
+    install_test_hasher();
+    install_test_keyring();
+    ferris_schema::register_doctype(DoctypeMeta {
+        name: SECRET_DOCTYPE.to_string(),
+        fields: vec![
+            field("title", "Data", 0),
+            ferris_schema::FieldMeta::password("password"),
+            ferris_schema::FieldMeta::secret("secret"),
+        ],
+        ..Default::default()
+    });
+
+    let engine = engine().await;
+    engine.ensure_table(SECRET_DOCTYPE).await.unwrap();
+    if crate::engine::search::ensure(engine.db()).await.is_err() {
+        eprintln!("FTS5 unavailable; nothing to assert");
+        return;
+    }
+    let ctx = EngineContext::new(SECRET_DOCTYPE, "").allow_anonymous(true);
+    let created = engine
+        .create(
+            &ctx,
+            ferris_core::value!({
+                "title": "visible needle",
+                "password": "CorrectHorse1!",
+                "secret": "top-secret-value"
+            }),
+        )
+        .await
+        .unwrap();
+    let name = created
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap()
+        .to_string();
+
+    let hits = crate::engine::search::names(engine.db(), SECRET_DOCTYPE, "needle")
+        .await
+        .unwrap();
+    assert!(hits.contains(&name), "the title is indexed");
+
+    // The stored values are the hash and the ciphertext; a slice of either must
+    // not be findable through the index.
+    let table = crate::engine::table_name(SECRET_DOCTYPE).unwrap();
+    let row = engine
+        .db()
+        .fetch_one(&Stmt::new(
+            format!("SELECT password, secret FROM {table} WHERE name = ?"),
+            vec![Value::from(name.as_str())],
+        ))
+        .await
+        .unwrap();
+    for column in ["password", "secret"] {
+        let stored = row.opt_str(column).unwrap_or_default();
+        assert!(!stored.is_empty(), "{column} was stored");
+        let token = alphanumeric_slice(&stored).unwrap_or_else(|| panic!("{column} has text"));
+        let hits = crate::engine::search::names(engine.db(), SECRET_DOCTYPE, &token)
+            .await
+            .unwrap();
+        assert!(
+            !hits.contains(&name),
+            "{column} reached the full-text index"
+        );
+    }
+    // The plaintext of neither value is searchable either.
+    for term in ["CorrectHorse", "topsecretvalue"] {
+        let hits = crate::engine::search::names(engine.db(), SECRET_DOCTYPE, term)
+            .await
+            .unwrap();
+        assert!(!hits.contains(&name), "plaintext {term} reached the index");
+    }
+}
+
+/// The longest run of alphanumerics in `text`, which a tokenizer keeps as one
+/// token. The whole run, not a prefix: a full-text match is a token match, so a
+/// prefix would be invisible even when the value *is* indexed.
+fn alphanumeric_slice(text: &str) -> Option<String> {
+    let mut best = String::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else if current.len() > best.len() {
+            best = std::mem::take(&mut current);
+        } else {
+            current.clear();
+        }
+    }
+    if current.len() > best.len() {
+        best = current;
+    }
+    (best.len() >= 12).then_some(best)
+}

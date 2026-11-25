@@ -167,7 +167,7 @@ impl DocumentEngine {
                     "renamed document still present under its old name in the full-text index"
                 );
             }
-            if let Err(error) = search::index(&mut sink, &ctx.doctype, &document).await {
+            if let Err(error) = search::index(&mut sink, &ctx.doctype, &document, &shape).await {
                 tracing::warn!(
                     %error,
                     doctype = %ctx.doctype,
@@ -277,6 +277,23 @@ impl DocumentEngine {
                 continue;
             }
             let quoted = q(sink.dialect(), &table)?;
+            // Most links are a single value: rewrite every one of them with one
+            // indexed `UPDATE` per column instead of reading the table and
+            // writing each row back. The old code scanned and deserialised the
+            // whole table for a rename.
+            for field in &link_fields {
+                let column = q(sink.dialect(), &field.fieldname)?;
+                sink.execute(&Stmt::new(
+                    format!("UPDATE {quoted} SET {column} = ? WHERE {column} = ?"),
+                    vec![Value::from(new_name), Value::from(old)],
+                ))
+                .await?;
+            }
+            // A multi-value link is a JSON array, so the column text carries the
+            // name inside quotes. Read only the rows the pattern can match — an
+            // exact single value was already rewritten above — and replace the
+            // element precisely there.
+            let needle = format!("%\"{old}\"%");
             let mut select = vec![q(sink.dialect(), "name")?];
             select.extend(
                 link_fields
@@ -284,10 +301,19 @@ impl DocumentEngine {
                     .map(|field| q(sink.dialect(), &field.fieldname))
                     .collect::<Result<Vec<_>>>()?,
             );
+            let matches = link_fields
+                .iter()
+                .map(|field| {
+                    q(sink.dialect(), &field.fieldname).map(|column| format!("{column} LIKE ?"))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join(" OR ");
+            let mut params: Vec<Value> = Vec::with_capacity(link_fields.len());
+            params.extend(link_fields.iter().map(|_| Value::from(needle.clone())));
             let rows = sink
                 .fetch_all(&Stmt::new(
-                    format!("SELECT {} FROM {quoted}", select.join(", ")),
-                    Vec::new(),
+                    format!("SELECT {} FROM {quoted} WHERE {matches}", select.join(", ")),
+                    params,
                 ))
                 .await?;
             for row in rows {
@@ -394,7 +420,6 @@ mod tests {
             )
             .await
             .unwrap();
-
         engine
             .rename(&target_ctx, "A7-TGT-1", "A7-TGT-2")
             .await
@@ -406,7 +431,6 @@ mod tests {
             Some("A7-TGT-2"),
             "the declared Link must follow the rename"
         );
-
         // Version history moved with the document instead of staying orphaned.
         let manager = crate::versioning::VersionManager::with_db(db.clone());
         assert!(
@@ -439,5 +463,70 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("draft"), "{err:?}");
+    }
+
+    /// A multi-value link is JSON text in one column: the rename rewrites the
+    /// element, not the whole value, and leaves the other entries untouched.
+    #[tokio::test]
+    async fn rename_rewrites_a_multi_value_link() {
+        ferris_schema::register_doctype(DoctypeMeta {
+            name: "A7MultiTarget".to_string(),
+            allow_rename: true,
+            ..Default::default()
+        });
+        ferris_schema::register_doctype(DoctypeMeta {
+            name: "A7MultiSource".to_string(),
+            fields: vec![ferris_schema::FieldMeta {
+                fieldname: "target".to_string(),
+                fieldtype: "Link".to_string(),
+                options: Some("A7MultiTarget".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let db = ferris_db::memory_db().await.unwrap();
+        crate::naming::NamingSeriesStore::ensure_table(&db)
+            .await
+            .unwrap();
+        let engine = DocumentEngine::new(db.clone());
+        let target_meta = ferris_schema::get_doctype("A7MultiTarget").unwrap();
+        let source_meta = ferris_schema::get_doctype("A7MultiSource").unwrap();
+        let target_ctx = EngineContext::new("A7MultiTarget", "")
+            .with_naming(NamingType::Prompt, None)
+            .with_meta(target_meta.as_ref())
+            .allow_anonymous(true);
+        let source_ctx = EngineContext::new("A7MultiSource", "")
+            .with_naming(NamingType::Prompt, None)
+            .with_meta(source_meta.as_ref())
+            .allow_anonymous(true);
+
+        engine
+            .create(&target_ctx, ferris_core::value!({ "name": "M-1" }))
+            .await
+            .unwrap();
+        engine
+            .create(
+                &source_ctx,
+                ferris_core::value!({ "name": "S-1", "target": ["M-1", "unrelated"] }),
+            )
+            .await
+            .unwrap();
+
+        engine.rename(&target_ctx, "M-1", "M-2").await.unwrap();
+
+        let table = crate::engine::table_name("A7MultiSource").unwrap();
+        let row = db
+            .fetch_one(&Stmt::new(
+                format!("SELECT target FROM {table} WHERE name = ?"),
+                vec![Value::from("S-1")],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            row.opt_str("target").as_deref(),
+            Some(r#"["M-2","unrelated"]"#),
+            "only the renamed element may change"
+        );
     }
 }
