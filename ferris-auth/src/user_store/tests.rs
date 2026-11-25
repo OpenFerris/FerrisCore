@@ -404,3 +404,78 @@ async fn the_account_language_round_trips_and_clears() {
         .expect("the user exists");
     assert_eq!(cleared.language, None);
 }
+
+/// Two accounts may not share an email or a username.
+///
+/// The login path resolves by `email` (then `username`) and takes the first
+/// match, and password reset mints a token for that same first match: a
+/// duplicate address would make sign-in and reset resolve an account the caller
+/// does not own. The unique indexes are the enforcement; the engine reports the
+/// constraint as `AlreadyExists`.
+#[tokio::test]
+async fn a_duplicate_email_or_username_is_refused() {
+    let store = UserStore::new(db().await);
+    store.init().await.unwrap();
+    store
+        .create(
+            "taken@example.com",
+            "First",
+            Some("first"),
+            super::UserType::SystemUser,
+            "Secret-Password1",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let duplicate_email = store
+        .create(
+            "taken@example.com",
+            "Second",
+            Some("second"),
+            super::UserType::SystemUser,
+            "Secret-Password2",
+            &[],
+        )
+        .await;
+    assert!(
+        matches!(
+            duplicate_email,
+            Err(Error::Document(DocumentError::AlreadyExists { .. }))
+        ),
+        "a duplicate email must be refused, got {duplicate_email:?}"
+    );
+
+    let duplicate_username = store
+        .create(
+            "other@example.com",
+            "Third",
+            Some("first"),
+            super::UserType::SystemUser,
+            "Secret-Password3",
+            &[],
+        )
+        .await;
+    assert!(
+        matches!(
+            duplicate_username,
+            Err(Error::Document(DocumentError::AlreadyExists { .. }))
+        ),
+        "a duplicate username must be refused, got {duplicate_username:?}"
+    );
+
+    // Two accounts without a username are still fine: `NULL` is not a value.
+    for (email, name) in [("a@example.com", "A"), ("b@example.com", "B")] {
+        store
+            .create(
+                email,
+                name,
+                None,
+                super::UserType::SystemUser,
+                "Secret-Password4",
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+}

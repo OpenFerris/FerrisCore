@@ -192,10 +192,16 @@ pub fn user_meta() -> DoctypeMeta {
                 .hidden(),
         )
         // Login resolves by email or username on every unauthenticated
-        // request; the JSON expression indexes keep those `=` filters pushed
-        // into SQL instead of scanning the small-but-hot user table.
-        .index(IndexMeta::new("idx_user_email", ["email"]))
-        .index(IndexMeta::new("idx_user_username", ["username"]))
+        // request; these indexes keep those `=` filters in SQL instead of
+        // scanning the small-but-hot user table. They are **unique**: the login
+        // path takes the first match, so two accounts sharing an address would
+        // make sign-in and password reset resolve one of them at random. The
+        // names are new (`_unique`) because `IF NOT EXISTS` would skip an index
+        // that already exists under the old, non-unique name.
+        .index(IndexMeta::new("idx_user_email_unique", ["email"]).unique())
+        // `username` is optional; every backend allows several `NULL`s in a
+        // unique index, so accounts without one are unaffected.
+        .index(IndexMeta::new("idx_user_username_unique", ["username"]).unique())
         // Confirming a reset/verification link resolves the account by digest,
         // so those two lookups must not scan the user table.
         .index(IndexMeta::new("idx_user_reset_key", ["reset_password_key"]))
