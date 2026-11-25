@@ -4,7 +4,6 @@ use ferris_core::hooks::DocStatus;
 use ferris_core::permissions::Permission;
 use ferris_core::{Error, Result, ValidationError, Value};
 use ferris_db::Stmt;
-use ferris_schema::DoctypeMeta;
 use std::collections::HashMap;
 
 pub(in crate::engine) fn set_docstatus_value(mut document: Value, status: DocStatus) -> Value {
@@ -42,44 +41,67 @@ pub(in crate::engine) fn rfc3339(ts: i64) -> Result<String> {
 /// reads inside its open transaction. The table must already be ensured by the
 /// caller: `apply` creates every table before it begins, and a DDL statement
 /// must never run inside the transaction.
-/// Write the JSON blob and the columns duplicated out of it, through `sink`.
+/// Write the system and declared columns through `sink`.
 ///
 /// `owner` is only overwritten when the document carries one, so an anonymous or
 /// system write cannot blank the owner a previous write attributed.
 ///
 /// Sink-agnostic so a caller inside an open transaction (`create_bulk`, `apply`,
 /// `set_docstatus`) persists on that transaction's connection instead of
-/// sneaking a second connection in.
-///
-/// The blob is [`canonical_blob`]; nothing else about the row changes here.
+/// sneaking a second connection in. The columns are the only storage: there is
+/// no `data` blob (ADR 0001). The caller passes the shape it already resolved,
+/// so the write cannot disagree with the read it was built from and no metadata
+/// query runs while the transaction holds the connection.
 pub(in crate::engine) async fn persist_written(
     sink: &mut WriteSink<'_>,
     table: &str,
+    doctype: &str,
     name: &str,
     document: &Value,
+    shape: &DocShape,
+    index_search: bool,
 ) -> Result<()> {
-    let serialized = canonical_blob(document)?;
     let docstatus = document
         .get("docstatus")
         .and_then(|v| v.as_str())
         .map(docstatus_from_str)
         .unwrap_or(DocStatus::Draft);
     let owner = document.get("owner").and_then(|v| v.as_str());
+    let typed = &shape.columns;
+    let extra = update_set(typed, sink.dialect())?;
+    let mut params = vec![
+        Value::from(owner),
+        Value::from(i64::from(docstatus as i16)),
+        Value::from(chrono::Utc::now().timestamp()),
+        Value::from(document.get("modified_by").and_then(Value::as_str)),
+        Value::from(document.get("amended_from").and_then(Value::as_str)),
+        Value::from(document.get("workflow_state").and_then(Value::as_str)),
+    ];
+    params.extend(column_values(typed, document));
+    params.push(Value::from(name));
     sink.execute(&Stmt::new(
         format!(
-            "UPDATE {} SET data = ?, docstatus = ?, owner = COALESCE(?, owner), modified = ? \
+            "UPDATE {} SET owner = COALESCE(?, owner), docstatus = ?, modified = ?, \
+             modified_by = ?, amended_from = ?, workflow_state = ?{extra} \
              WHERE name = ?",
             q(sink.dialect(), table)?
         ),
-        vec![
-            Value::from(serialized),
-            Value::from(i64::from(docstatus as i16)),
-            Value::from(owner),
-            Value::from(chrono::Utc::now().timestamp()),
-            Value::from(name),
-        ],
+        params,
     ))
     .await?;
+    // The child arrays travel with the document; replace their real rows in the
+    // same transaction as the parent.
+    write_children(sink, shape, doctype, name, document).await?;
+    if index_search && let Err(error) = search::index(sink, doctype, document).await {
+        // Best effort, like `insert_row`: the row is saved whatever the index
+        // does, and the Rust scan still answers a search for it.
+        tracing::warn!(
+            %error,
+            doctype,
+            name,
+            "document saved but not indexed for full-text search"
+        );
+    }
     Ok(())
 }
 

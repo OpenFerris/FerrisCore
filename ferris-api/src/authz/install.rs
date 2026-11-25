@@ -354,24 +354,32 @@ mod tests {
         });
 
         let pool = ferris_db::memory_db().await.unwrap();
+        // The real `Custom DocPerm` columns (ADR 0001): there is no `data`
+        // blob. Only the columns this test exercises are needed; the reader
+        // treats an absent column as its default.
         pool.ensure_table(
             "tabCustomDocPerm",
             &[
                 Column::new("name", "VARCHAR(255)").not_null().primary_key(),
-                Column::new("data", "TEXT").not_null(),
+                Column::new("parent", "VARCHAR(255)"),
+                Column::new("role", "VARCHAR(255)"),
+                Column::new("permlevel", "INTEGER"),
+                Column::new("select", "BOOLEAN"),
             ],
         )
         .await
         .unwrap();
-        let data = serde_json::json!({
-            "parent": doctype,
-            "role": role,
-            "select": 1,
-        })
-        .to_string();
-        pool.execute(&ferris_db::Stmt::raw(format!(
-            "INSERT INTO tabCustomDocPerm (name, data) VALUES ('row-1', '{data}')"
-        )))
+        pool.execute(&ferris_db::Stmt::new(
+            "INSERT INTO tabCustomDocPerm (name, parent, role, permlevel, \"select\") \
+             VALUES (?, ?, ?, ?, ?)",
+            vec![
+                ferris_core::Value::from("row-1"),
+                ferris_core::Value::from(doctype),
+                ferris_core::Value::from(role),
+                ferris_core::Value::from(0_i64),
+                ferris_core::Value::from(true),
+            ],
+        ))
         .await
         .unwrap();
 

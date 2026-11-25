@@ -91,7 +91,7 @@ pub(in crate::engine) fn field_read_allowed(ctx: &EngineContext<'_>, field: &Fie
 /// * a field at a level the caller may not write is **dropped**, so the update
 ///   keeps the stored value and an insert stores nothing there; and
 /// * a `Password` value that is the read mask means "unchanged" and is dropped,
-///   while any other value is hashed before it can reach the blob;
+///   while any other value is hashed before it can reach its column;
 /// * a `Secret` value follows the same mask rule, but is **encrypted** (AES-GCM,
 ///   see `ferris_core::secret`) so a trusted runtime can recover it. Writing an
 ///   already-encrypted envelope is rejected: it would store a double-wrapped
@@ -326,10 +326,16 @@ pub(in crate::engine) fn user_permission_allows(ctx: &EngineContext<'_>, documen
         .all(|(allow, group)| user_permission_group_allows(ctx, document, allow, group))
 }
 
-/// [`user_permission_allows`] as an error, for the single-document read paths.
-pub(in crate::engine) fn enforce_user_permission_read(
+/// [`user_permission_allows`] as an error, for any action.
+///
+/// The read paths used to be the only callers; `update` and `delete` authorised
+/// against the role rules alone, so a user limited to `Customer A` could still
+/// rewrite or trash a `Customer B` row it owned. Every action that reads a
+/// stored document now runs this against that document.
+pub(in crate::engine) fn enforce_user_permission(
     ctx: &EngineContext<'_>,
     document: &Value,
+    action: Permission,
 ) -> Result<()> {
     if user_permission_allows(ctx, document) {
         return Ok(());
@@ -339,9 +345,17 @@ pub(in crate::engine) fn enforce_user_permission_read(
         .and_then(Value::as_str)
         .unwrap_or_default();
     Err(Error::Authz(ferris_core::AuthzError::PermissionDenied {
-        action: Permission::Read.as_str().to_string(),
+        action: action.as_str().to_string(),
         resource: format!("{} {name}", ctx.doctype),
     }))
+}
+
+/// [`enforce_user_permission`] for a read.
+pub(in crate::engine) fn enforce_user_permission_read(
+    ctx: &EngineContext<'_>,
+    document: &Value,
+) -> Result<()> {
+    enforce_user_permission(ctx, document, Permission::Read)
 }
 
 /// Reject a write whose `Link` fields name a value the caller may not reach.
@@ -486,7 +500,7 @@ const STRUCTURAL_FIELDS: [&str; 4] = ["idx", "parent", "parenttype", "parentfiel
 /// `modified_by`.
 ///
 /// Runs on both insert and update, before the field-level rules, so an
-/// undeclared key never reaches a blob. `modified_by` is accepted only when it
+/// undeclared key never reaches a column. `modified_by` is accepted only when it
 /// equals the acting session's id (the value the engine is about to stamp);
 /// with no session it is dropped, because keeping a caller-chosen name there
 /// would attribute the write to somebody who did not make it.

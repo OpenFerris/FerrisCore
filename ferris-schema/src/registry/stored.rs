@@ -29,23 +29,60 @@ const ACTION_TABLE: &str = "tabDocTypeAction";
 const LINK_TABLE: &str = "tabDocTypeLink";
 const PERMISSION_TYPE_TABLE: &str = "tabPermissionType";
 
-/// Every stored row of `table` whose `document_type` is `doctype`.
-async fn rows_for(pool: &Db, table: &str, doctype: &str) -> Result<Vec<Value>> {
+/// The columns each stored-metadata table is read from.
+///
+/// Columns are the only source of truth (ADR 0001): there is no `data` blob to
+/// decode. The lists mirror the `DoctypeMeta` declarations in
+/// `crate::doctypes::form_meta`; a column the table does not have is a schema
+/// mismatch, not something to paper over.
+const ACTION_COLUMNS: &[&str] = &[
+    "name",
+    "document_type",
+    "label",
+    "action_type",
+    "action",
+    "group",
+    "hidden",
+];
+const LINK_COLUMNS: &[&str] = &[
+    "name",
+    "document_type",
+    "link_doctype",
+    "link_fieldname",
+    "table_fieldname",
+    "group",
+    "hidden",
+];
+const PERMISSION_TYPE_COLUMNS: &[&str] = &["name", "document_type", "perm_type"];
+
+/// Every stored row of `table` as a document built from `columns`.
+async fn rows_for(pool: &Db, table: &str, doctype: &str, columns: &[&str]) -> Result<Vec<Value>> {
     if !pool.table_exists(table).await? {
         return Ok(Vec::new());
     }
+    let select = columns
+        .iter()
+        .map(|column| Ident::new(column).map(|ident| ident.quote(pool.dialect())))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .join(", ");
     let quoted = Ident::new(table)?.quote(pool.dialect());
     let rows = pool
         .fetch_all(&Stmt::new(
-            format!("SELECT data FROM {quoted} ORDER BY name"),
+            format!("SELECT {select} FROM {quoted} ORDER BY name"),
             Vec::new(),
         ))
         .await?;
     let mut documents = Vec::with_capacity(rows.len());
     for row in rows {
-        let data = row.str("data")?;
-        let value: Value = serde_json::from_str(&data)
-            .map_err(|error| Error::Serialization(SerializationError::Json(error)))?;
+        let mut document = ferris_core::Map::new();
+        for column in columns {
+            if let Some(text) = row.opt_str(column) {
+                document.insert((*column).to_string(), Value::from(text));
+            } else if let Some(flag) = row.opt_bool(column) {
+                document.insert((*column).to_string(), Value::Bool(flag));
+            }
+        }
+        let value = Value::Object(document);
         if value.get("document_type").and_then(Value::as_str) == Some(doctype) {
             documents.push(value);
         }
@@ -84,7 +121,7 @@ fn toggle(value: &Value, field: &str) -> bool {
 ///
 /// A malformed stored row, or a database failure while reading the table.
 pub async fn doc_actions(pool: &Db, doctype: &str) -> Result<Vec<DynDocAction>> {
-    let mut actions: Vec<DynDocAction> = rows_for(pool, ACTION_TABLE, doctype)
+    let mut actions: Vec<DynDocAction> = rows_for(pool, ACTION_TABLE, doctype, ACTION_COLUMNS)
         .await?
         .into_iter()
         .map(|row| DynDocAction {
@@ -110,7 +147,7 @@ pub async fn doc_actions(pool: &Db, doctype: &str) -> Result<Vec<DynDocAction>> 
 ///
 /// A malformed stored row, or a database failure while reading the table.
 pub async fn doc_links(pool: &Db, doctype: &str) -> Result<Vec<DynDocLink>> {
-    let mut links: Vec<DynDocLink> = rows_for(pool, LINK_TABLE, doctype)
+    let mut links: Vec<DynDocLink> = rows_for(pool, LINK_TABLE, doctype, LINK_COLUMNS)
         .await?
         .into_iter()
         .map(|row| DynDocLink {
@@ -140,15 +177,20 @@ pub async fn doc_links(pool: &Db, doctype: &str) -> Result<Vec<DynDocLink>> {
 ///
 /// A malformed stored row, or a database failure while reading the table.
 pub async fn permission_types(pool: &Db, doctype: &str) -> Result<Vec<DynCustomPermission>> {
-    let mut permissions: Vec<DynCustomPermission> = rows_for(pool, PERMISSION_TYPE_TABLE, doctype)
-        .await?
-        .into_iter()
-        .map(|row| DynCustomPermission {
-            perm_type: text(&row, "perm_type"),
-            role: String::new(),
-        })
-        .filter(|permission| !permission.perm_type.is_empty())
-        .collect();
+    let mut permissions: Vec<DynCustomPermission> = rows_for(
+        pool,
+        PERMISSION_TYPE_TABLE,
+        doctype,
+        PERMISSION_TYPE_COLUMNS,
+    )
+    .await?
+    .into_iter()
+    .map(|row| DynCustomPermission {
+        perm_type: text(&row, "perm_type"),
+        role: String::new(),
+    })
+    .filter(|permission| !permission.perm_type.is_empty())
+    .collect();
     permissions.sort_by(|left, right| left.perm_type.cmp(&right.perm_type));
     permissions.dedup_by(|left, right| left.perm_type == right.perm_type);
     Ok(permissions)

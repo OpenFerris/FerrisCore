@@ -55,14 +55,11 @@ pub(crate) async fn ensure_version_schema(db: &Db) -> Result<()> {
     for column in chain_columns() {
         db.ensure_column(TAB_VERSION, &column).await?;
     }
-    // `get_versions` filters on (doctype, docname) and orders by version.
-    db.ensure_index(
-        "idx_version_doc",
-        TAB_VERSION,
-        &["doctype", "docname"],
-        false,
-    )
-    .await
+    // `get_versions` filters on `(doctype, docname)` and orders by `version`;
+    // the table's primary key is exactly `(doctype, docname, version)`, so no
+    // second index is needed and every version insert stays a single index
+    // update.
+    Ok(())
 }
 
 fn row_to_version(row: &Row) -> DocumentVersion {

@@ -53,6 +53,7 @@ where
 mod tests {
     use super::*;
     use crate::store::DocStore;
+    use crate::test_support::register_probe;
     use ferris_core::{AuthzError, Error, value};
     use ferris_document::{ActivityKind, EngineContext};
 
@@ -69,6 +70,7 @@ mod tests {
     /// own `modified`/`modified_by` must not appear as user edits).
     #[tokio::test]
     async fn rest_writes_are_recorded_in_the_activity_feed() {
+        register_probe();
         let pool = ferris_db::memory_db().await.unwrap();
         ferris_document::with_user(Some(admin()), async {
             DocStore::create(

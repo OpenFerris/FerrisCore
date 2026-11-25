@@ -107,9 +107,6 @@ fn debug_output_redacts_secrets_but_serialization_keeps_them() {
     );
 
     let auth = AuthConfig {
-        jwt_secret: Some("jwt-secret-value".into()),
-        jwt_expiry_hours: 8,
-        refresh_expiry_days: 14,
         password_min_length: 8,
         password_require_uppercase: true,
         password_require_lowercase: true,
@@ -117,14 +114,57 @@ fn debug_output_redacts_secrets_but_serialization_keeps_them() {
         password_require_symbols: false,
         max_login_attempts: 5,
         lockout_duration_minutes: 15,
-        mfa_enabled: false,
         mfa_issuer: "ferris".into(),
         session_timeout_minutes: 60,
+        session_idle_timeout_minutes: 30,
         max_sessions_per_user: 5,
+        require_email_verification: false,
         oauth: OAuthConfig::default(),
     };
     let auth_debug = format!("{auth:?}");
-    assert!(!auth_debug.contains("jwt-secret-value"), "{auth_debug}");
+    assert!(auth_debug.contains("password_min_length"), "{auth_debug}");
+    assert!(
+        auth_debug.contains("session_idle_timeout_minutes"),
+        "the Debug must expose the idle window: {auth_debug}"
+    );
+    // The idle window is optional in a config written before Wave 3c; its
+    // default is the 30-minute window the server enforced at the time.
+    assert_eq!(AuthConfig::default().session_idle_timeout_minutes, 30);
+}
+
+/// The email-verification gate is opt-in: a config written before the key
+/// existed keeps the old behaviour, where verification was self-service only.
+#[test]
+fn email_verification_gate_defaults_to_off_for_legacy_configs() {
+    assert!(
+        !AuthConfig::default().require_email_verification,
+        "the gate must default to off"
+    );
+
+    let mut legacy = serde_json::to_value(AuthConfig::default()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("require_email_verification");
+    let parsed: AuthConfig = serde_json::from_value(legacy).expect("a legacy [auth] parses");
+    assert!(!parsed.require_email_verification);
+
+    let enabled: AuthConfig = serde_json::from_value(serde_json::json!({
+        "password_min_length": 8,
+        "password_require_uppercase": true,
+        "password_require_lowercase": true,
+        "password_require_numbers": true,
+        "password_require_symbols": false,
+        "max_login_attempts": 5,
+        "lockout_duration_minutes": 15,
+        "mfa_issuer": "Ferris",
+        "session_timeout_minutes": 60,
+        "max_sessions_per_user": 5,
+        "require_email_verification": true,
+        "oauth": { "providers": [] },
+    }))
+    .expect("the gate is read when present");
+    assert!(enabled.require_email_verification);
 }
 
 /// Every `SslMode` round-trips through serde with the spellings libpq/MySQL

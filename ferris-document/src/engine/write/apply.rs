@@ -37,7 +37,7 @@ impl DocumentEngine {
         // Ensure every table and resolve the shared cascade set *before*
         // opening the transaction: a DDL statement must never run inside it.
         for op in &ops {
-            self.ensure_table(&op.ctx.doctype).await?;
+            self.ensure_table_with(&op.ctx.doctype, op.ctx.meta).await?;
         }
         // `tab_series` too: an `Upsert` that lands as an insert mints a name
         // inside the transaction (see `prepare_insert_checked`), and the naming
@@ -120,7 +120,7 @@ impl DocumentEngine {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        match read_row_via(sink, &ctx.doctype, &name).await {
+        match read_row_via(sink, &self.db, &ctx.doctype, &name, ctx.meta).await {
             Ok(_) => {
                 let table = table_name(&ctx.doctype)?;
                 self.update_via(sink, &table, ctx, &name, data).await

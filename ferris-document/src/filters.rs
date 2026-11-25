@@ -1,10 +1,11 @@
 //! Structured list filters evaluated in Rust over parsed documents.
 //!
-//! The engine stores documents as JSON blobs (see [`crate::engine`]), so
-//! filtering happens in memory. These helpers evaluate the operator-based
-//! filters the Desk sends (`[[field, op, value, or?], …]`) and sort documents
-//! by an `order_by` expression. Legacy equality maps (`GET /api/resource`
-//! query params) keep their own HashMap path in [`crate::engine::ListQuery`].
+//! SQL answers the filters it can (see [`crate::list_sql`]); the ones that
+//! cannot be pushed down are evaluated in memory over the reconstructed
+//! document. These helpers evaluate the operator-based filters the Desk sends
+//! (`[[field, op, value, or?], …]`) and sort documents by an `order_by`
+//! expression. Legacy equality maps (`GET /api/resource` query params) keep
+//! their own HashMap path in [`crate::engine::ListQuery`].
 
 use std::cmp::Ordering;
 use std::collections::HashMap;

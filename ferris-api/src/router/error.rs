@@ -71,13 +71,11 @@ pub fn error_response(e: Error) -> Response {
     };
     let mut response = (status, Json(ApiError::new(label, message))).into_response();
 
-    // Add WWW-Authenticate header for 401 responses. Both values are static,
-    // so `from_static` builds them without a fallible parse.
+    // A 401 is per-request: never let a proxy or the browser cache it. There is
+    // no `WWW-Authenticate` challenge: the browser credential is a session
+    // cookie and the API credential is the `token` scheme, neither of which is
+    // an HTTP authentication scheme a client can negotiate from this response.
     if status == StatusCode::UNAUTHORIZED {
-        response.headers_mut().insert(
-            axum::http::header::WWW_AUTHENTICATE,
-            axum::http::HeaderValue::from_static("Bearer"),
-        );
         response.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
             axum::http::HeaderValue::from_static("no-store"),

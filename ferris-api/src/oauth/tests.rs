@@ -8,10 +8,10 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
+use ferris_auth::login::{Backend, DbSessionStore, SessionConfig};
 use ferris_auth::oauth::{NEXT_COOKIE, STATE_COOKIE};
 use ferris_auth::{
-    OAuthConfig, OAuthManager, OAuthProviderConfig, PkceMethod, SessionConfig, SessionManager,
-    StateStoreConfig, UserType,
+    OAuthConfig, OAuthManager, OAuthProviderConfig, PkceMethod, StateStoreConfig, UserType,
 };
 use ferris_core::Value;
 use tower::ServiceExt;
@@ -39,21 +39,13 @@ fn provider(server: &MockServer) -> OAuthProviderConfig {
         pkce_enabled: true,
         pkce_method: PkceMethod::S256,
         redirect_uris: vec!["https://app.example.com/api/oauth/github/callback".to_string()],
+        require_verified_email: true,
+        oidc: false,
     }
 }
 
-fn config(server: &MockServer) -> OAuthConfig {
-    OAuthConfig {
-        providers: vec![provider(server)],
-        state_store: StateStoreConfig {
-            enabled: true,
-            ttl_seconds: 600,
-        },
-    }
-}
-
-/// The token endpoint and the userinfo endpoint of a healthy provider.
-async fn provider_mocks(server: &MockServer, email: &str) {
+/// The token endpoint of a healthy provider.
+async fn token_mock(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -64,30 +56,60 @@ async fn provider_mocks(server: &MockServer, email: &str) {
         })))
         .mount(server)
         .await;
+}
+
+/// The userinfo endpoint answering `body` verbatim.
+async fn userinfo_mock(server: &MockServer, body: serde_json::Value) {
     Mock::given(method("GET"))
         .and(path("/userinfo"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({ "email": email, "login": "ada" })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(server)
         .await;
 }
 
-/// A login gate on an in-memory database with one usable account.
-async fn handlers() -> SessionHandlers {
-    let config = SessionConfig {
-        // The test client speaks plain HTTP; a `Secure` cookie would never come
-        // back, and these assertions are about the flow, not about TLS.
-        secure_cookies: false,
-        ..SessionConfig::default()
-    };
-    let handlers = SessionHandlers::new(
-        config.clone(),
-        SessionManager::new(config),
-        ferris_db::memory_db().await.expect("in-memory db"),
-    );
-    handlers.user_store.init().await.expect("user table");
+/// The token endpoint and the userinfo endpoint of a healthy provider: a
+/// verified address and a stable subject.
+async fn provider_mocks(server: &MockServer, email: &str) {
+    token_mock(server).await;
+    userinfo_mock(
+        server,
+        serde_json::json!({
+            "email": email,
+            "email_verified": true,
+            "sub": "github|ada",
+            "login": "ada"
+        }),
+    )
+    .await;
+}
+
+/// The router under test plus the state and store it shares, so a test can
+/// prove the callback really opened a `tower-sessions` record.
+async fn app(server: &MockServer) -> (Router, OAuthState, DbSessionStore) {
+    app_with(provider(server)).await
+}
+
+/// The same router with a provider config of the caller's choosing (verified
+/// email off, another provider name, …).
+async fn app_with(provider: OAuthProviderConfig) -> (Router, OAuthState, DbSessionStore) {
+    app_with_policy(provider, false).await
+}
+
+/// [`app_with`] with the opt-in email-verification policy set explicitly.
+async fn app_with_policy(
+    provider: OAuthProviderConfig,
+    require_email_verification: bool,
+) -> (Router, OAuthState, DbSessionStore) {
+    let pool = ferris_db::memory_db().await.expect("in-memory db");
+    let store = DbSessionStore::new(pool.clone());
+    store.ensure_table().await.expect("session table");
+    let backend = Backend::new(pool.clone());
+    backend.init().await.expect("user table");
+    // The test client speaks plain HTTP; a `Secure` cookie would never come
+    // back, and these assertions are about the flow, not about TLS.
+    let session_config = SessionConfig::default();
+    let mut handlers = SessionHandlers::new(session_config.clone(), store.clone(), pool.clone());
+    handlers.require_email_verification = require_email_verification;
     // An empty password means "no password login": the point of the account is
     // the provider-proven email, and hashing one would cost seconds of Argon2
     // for nothing.
@@ -103,18 +125,23 @@ async fn handlers() -> SessionHandlers {
         )
         .await
         .expect("seed the oauth account");
-    handlers
-}
-
-/// The router under test plus the state it shares, so a test can prove the login
-/// really opened a session on the same `SessionManager` the auth middleware uses.
-async fn app(server: &MockServer) -> (Router, OAuthState) {
-    let state = OAuthState::new(
-        OAuthManager::new(config(server)).expect("oauth manager"),
-        handlers().await,
-    );
-    let router: Router = oauth_router_with_state().with_state(state.clone());
-    (router, state)
+    let config = OAuthConfig {
+        providers: vec![provider],
+        state_store: StateStoreConfig {
+            enabled: true,
+            ttl_seconds: 600,
+        },
+    };
+    let state = OAuthState::new(OAuthManager::new(config).expect("oauth manager"), handlers);
+    let router: Router =
+        oauth_router_with_state()
+            .with_state(state.clone())
+            .layer(ferris_auth::login::auth_layer(
+                &session_config,
+                store.clone(),
+                backend,
+            ));
+    (router, state, store)
 }
 
 fn get(uri: &str, cookies: &[(&str, String)]) -> Request<Body> {
@@ -198,7 +225,7 @@ async fn start(router: &Router, next: Option<&str>) -> (String, String) {
 async fn the_callback_opens_a_session_and_redirects_to_next() {
     let server = MockServer::start().await;
     provider_mocks(&server, EMAIL).await;
-    let (router, state) = app(&server).await;
+    let (router, state, store) = app(&server).await;
 
     let (oauth_state, next) = start(&router, Some("/desk/module/doctype/row")).await;
     assert_eq!(next, "/desk/module/doctype/row");
@@ -245,27 +272,204 @@ async fn the_callback_opens_a_session_and_redirects_to_next() {
         "provider tokens must not travel to the client: {leaked}"
     );
 
-    // The session really exists, belongs to the resolved account, and its CSRF
-    // token is the one the callback handed out.
-    let stored = state
-        .session
-        .session_manager
-        .get_session(&session_id)
+    // The session really exists, belongs to the resolved account, and the
+    // callback handed out a CSRF token for it.
+    let owner = store
+        .session_user_id(&session_id)
         .await
         .expect("session lookup")
         .expect("the oauth login created a session");
     let user = state
         .session
         .user_store
-        .find_by_id(&stored.user_id)
+        .find_by_id(&owner)
         .await
         .expect("user lookup")
         .expect("the session belongs to a real user");
     assert_eq!(user.email, EMAIL);
-    assert_eq!(stored.csrf_token, csrf);
+    assert_eq!(
+        state
+            .session
+            .user_store
+            .oauth_subject(&owner)
+            .await
+            .expect("subject lookup"),
+        Some("github|ada".to_string()),
+        "the provider's stable subject is bound on the first login"
+    );
+    assert!(!csrf.is_empty(), "the callback exposes the CSRF token");
+}
+
+/// Run the callback for a state the caller already started.
+async fn redeem(router: &Router, oauth_state: &str) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(get(
+            &format!("/api/oauth/github/callback?code=the-code&state={oauth_state}"),
+            &[(STATE_COOKIE, oauth_state.to_string())],
+        ))
+        .await
+        .expect("callback")
+}
+
+/// A provider that has not verified the address must not resolve an account,
+/// even though the email matches a real one.
+#[tokio::test]
+async fn an_unverified_email_is_refused() {
+    let server = MockServer::start().await;
+    token_mock(&server).await;
+    userinfo_mock(
+        &server,
+        serde_json::json!({ "email": EMAIL, "email_verified": false, "sub": "github|ada" }),
+    )
+    .await;
+    let (router, _state, _store) = app(&server).await;
+
+    let (oauth_state, _) = start(&router, None).await;
+    let callback = redeem(&router, &oauth_state).await;
+    assert_eq!(callback.status(), StatusCode::FORBIDDEN);
     assert!(
-        stored.ip_address.is_some(),
-        "the session records the client ip"
+        cookies(callback.headers())
+            .iter()
+            .all(|raw| !raw.starts_with("ferris_session=")),
+        "a refused callback must not set a session cookie"
+    );
+}
+
+/// "The provider did not say" is not "verified": a missing claim is refused
+/// when the provider requires verification.
+#[tokio::test]
+async fn a_missing_email_verified_claim_is_refused() {
+    let server = MockServer::start().await;
+    token_mock(&server).await;
+    userinfo_mock(
+        &server,
+        serde_json::json!({ "email": EMAIL, "sub": "github|ada" }),
+    )
+    .await;
+    let (router, _state, _store) = app(&server).await;
+
+    let (oauth_state, _) = start(&router, None).await;
+    let callback = redeem(&router, &oauth_state).await;
+    assert_eq!(callback.status(), StatusCode::FORBIDDEN);
+}
+
+/// A provider whose addresses are verified by other means can opt out, and the
+/// login then completes without the claim.
+#[tokio::test]
+async fn a_provider_can_opt_out_of_email_verification() {
+    let server = MockServer::start().await;
+    token_mock(&server).await;
+    userinfo_mock(
+        &server,
+        serde_json::json!({ "email": EMAIL, "email_verified": false, "sub": "github|ada" }),
+    )
+    .await;
+    let mut opted_out = provider(&server);
+    opted_out.require_verified_email = false;
+    let (router, _state, _store) = app_with(opted_out).await;
+
+    let (oauth_state, _) = start(&router, None).await;
+    let callback = redeem(&router, &oauth_state).await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+}
+
+/// With the opt-in local policy on, the provider's verified email satisfies it:
+/// the callback marks the local account verified before opening the session.
+#[tokio::test]
+async fn a_verified_provider_email_marks_the_local_account_verified() {
+    let server = MockServer::start().await;
+    provider_mocks(&server, EMAIL).await;
+    let (router, state, _store) = app_with_policy(provider(&server), true).await;
+
+    let user = state
+        .session
+        .user_store
+        .find_by_login(EMAIL)
+        .await
+        .expect("lookup")
+        .expect("the seeded account");
+    assert!(
+        !user.email_verified,
+        "the account starts unverified, which the policy would refuse"
+    );
+
+    let (oauth_state, _) = start(&router, None).await;
+    let callback = redeem(&router, &oauth_state).await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+
+    let refreshed = state
+        .session
+        .user_store
+        .find_by_id(&user.id)
+        .await
+        .expect("lookup")
+        .expect("the account");
+    assert!(
+        refreshed.email_verified,
+        "the provider's proof is recorded on the local account"
+    );
+}
+
+/// A provider that opted out of verification cannot satisfy the local policy:
+/// the callback refuses instead of opening a session for an unverified address.
+#[tokio::test]
+async fn an_unverified_provider_email_fails_the_local_policy() {
+    let server = MockServer::start().await;
+    token_mock(&server).await;
+    userinfo_mock(
+        &server,
+        serde_json::json!({ "email": EMAIL, "email_verified": false, "sub": "github|ada" }),
+    )
+    .await;
+    let mut opted_out = provider(&server);
+    opted_out.require_verified_email = false;
+    let (router, _state, _store) = app_with_policy(opted_out, true).await;
+
+    let (oauth_state, _) = start(&router, None).await;
+    let callback = redeem(&router, &oauth_state).await;
+    assert_eq!(callback.status(), StatusCode::FORBIDDEN);
+    let body = body_json(callback).await.to_string();
+    assert!(body.contains("verify your email address"), "{body}");
+}
+
+/// A subject already bound to the account is never overwritten: a login
+/// presenting a different identity for the same email is refused and the
+/// original binding survives.
+#[tokio::test]
+async fn a_different_subject_is_refused_and_the_binding_is_kept() {
+    let server = MockServer::start().await;
+    provider_mocks(&server, EMAIL).await;
+    let (router, state, _store) = app(&server).await;
+
+    let user = state
+        .session
+        .user_store
+        .find_by_login(EMAIL)
+        .await
+        .expect("lookup")
+        .expect("the seeded account");
+    state
+        .session
+        .user_store
+        .set_oauth_subject(&user.id, Some("github|other"))
+        .await
+        .expect("pre-bind another subject");
+
+    let (oauth_state, _) = start(&router, None).await;
+    let callback = redeem(&router, &oauth_state).await;
+    assert_eq!(callback.status(), StatusCode::FORBIDDEN);
+    let body = body_json(callback).await.to_string();
+    assert!(body.contains("linked to another account"), "{body}");
+    assert_eq!(
+        state
+            .session
+            .user_store
+            .oauth_subject(&user.id)
+            .await
+            .expect("subject lookup"),
+        Some("github|other".to_string()),
+        "the existing binding must not be overwritten"
     );
 }
 
@@ -275,7 +479,7 @@ async fn the_callback_opens_a_session_and_redirects_to_next() {
 async fn the_callback_without_the_state_cookie_is_refused() {
     let server = MockServer::start().await;
     provider_mocks(&server, EMAIL).await;
-    let (router, _state) = app(&server).await;
+    let (router, _state, _store) = app(&server).await;
 
     let (oauth_state, _) = start(&router, None).await;
     let callback = router
@@ -309,7 +513,7 @@ async fn the_callback_without_the_state_cookie_is_refused() {
 async fn a_state_from_another_browser_is_refused() {
     let server = MockServer::start().await;
     provider_mocks(&server, EMAIL).await;
-    let (router, _state) = app(&server).await;
+    let (router, _state, _store) = app(&server).await;
 
     let (first_state, _) = start(&router, None).await;
     let (second_state, _) = start(&router, None).await;
@@ -331,7 +535,7 @@ async fn a_state_from_another_browser_is_refused() {
 async fn a_replayed_callback_is_refused() {
     let server = MockServer::start().await;
     provider_mocks(&server, EMAIL).await;
-    let (router, _state) = app(&server).await;
+    let (router, _state, _store) = app(&server).await;
 
     let (oauth_state, _) = start(&router, None).await;
     let url = format!("/api/oauth/github/callback?code=the-code&state={oauth_state}");
@@ -356,7 +560,7 @@ async fn a_replayed_callback_is_refused() {
 async fn an_unknown_email_is_refused() {
     let server = MockServer::start().await;
     provider_mocks(&server, "stranger@example.com").await;
-    let (router, _state) = app(&server).await;
+    let (router, _state, _store) = app(&server).await;
 
     let (oauth_state, _) = start(&router, None).await;
     let callback = router
@@ -376,7 +580,7 @@ async fn an_unknown_email_is_refused() {
 async fn a_state_cannot_be_used_with_another_provider() {
     let server = MockServer::start().await;
     provider_mocks(&server, EMAIL).await;
-    let (router, _state) = app(&server).await;
+    let (router, _state, _store) = app(&server).await;
 
     let (oauth_state, _) = start(&router, None).await;
     let callback = router

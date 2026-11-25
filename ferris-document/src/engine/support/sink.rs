@@ -3,9 +3,28 @@ use super::*;
 use ferris_core::hooks::HookPoint;
 use ferris_core::{DocumentError, Error, Result, SerializationError, Value};
 use ferris_db::{Affected, Db, Dialect, Stmt, Tx};
+use std::sync::Arc;
 
 pub(in crate::engine) async fn read_row_via(
     sink: &mut WriteSink<'_>,
+    db: &Db,
+    doctype: &str,
+    name: &str,
+    fallback: Option<&DoctypeMeta>,
+) -> Result<(Value, Option<String>)> {
+    let shape = DocShape::resolve(db, doctype, sink.dialect(), fallback).await?;
+    read_row_with_shape_via(sink, &shape, doctype, name).await
+}
+
+/// [`read_row_via`] with the physical shape already resolved.
+///
+/// A lifecycle operation (`update`, `delete`, `rename`, `restore`, `purge`)
+/// resolves the shape before it opens its transaction and passes it here, so the
+/// read and the write it drives agree on the same columns without resolving
+/// them twice.
+pub(in crate::engine) async fn read_row_with_shape_via(
+    sink: &mut WriteSink<'_>,
+    shape: &DocShape,
     doctype: &str,
     name: &str,
 ) -> Result<(Value, Option<String>)> {
@@ -13,7 +32,8 @@ pub(in crate::engine) async fn read_row_via(
     let row = sink
         .fetch_optional(&Stmt::new(
             format!(
-                "SELECT data, owner FROM {} WHERE name = ?",
+                "SELECT {} FROM {} WHERE name = ?",
+                shape.select_list(sink.dialect())?,
                 q(sink.dialect(), &table)?
             ),
             vec![Value::from(name)],
@@ -21,10 +41,9 @@ pub(in crate::engine) async fn read_row_via(
         .await?;
     match row {
         Some(row) => {
-            let data = row.str("data")?;
             let owner = row.opt_str("owner");
-            let value = serde_json::from_str(&data)
-                .map_err(|e| Error::Serialization(SerializationError::Json(e)))?;
+            let mut value = shape.row_to_document(&row)?;
+            read_children(sink, shape, doctype, name, &mut value).await?;
             Ok((value, owner))
         }
         None => Err(Error::Document(DocumentError::NotFound {
@@ -127,6 +146,14 @@ pub(crate) struct PreparedInsert {
     /// Full document after the `Validate`/`BeforeInsert` hooks (authoritative).
     pub(in crate::engine) document: Value,
     pub(in crate::engine) dialect: Dialect,
+    /// The effective columns and child tables resolved from metadata.
+    pub(in crate::engine) shape: Arc<DocShape>,
+    /// Whether the full-text index is available for this database and DocType.
+    ///
+    /// Resolved once by the caller (`engine::search::ready_for`), because a
+    /// transaction cannot name its `Db` and the write path must not probe DDL
+    /// from inside one.
+    pub(in crate::engine) index_search: bool,
 }
 
 /// Run one prepared insert through `sink`, then the after-insert lifecycle.
@@ -175,23 +202,32 @@ pub(in crate::engine) async fn insert_row(
         .map(docstatus_from_str)
         .unwrap_or(DocStatus::Draft);
 
-    let serialized = canonical_blob(&fields_to_value(fields.clone()))?;
+    let document = fields_to_value(fields.clone());
     let quoted = q(prepared.dialect, &prepared.table)?;
-    // `docstatus` is a SMALLINT on disk and a word in `data`; the two have to
-    // agree, so both are written from the same value.
+    let shape = &prepared.shape;
+    let extra_columns = column_list(&shape.columns, prepared.dialect)?;
+    let extra_placeholders = column_placeholders(&shape.columns, prepared.dialect);
+    let mut params = vec![
+        Value::from(field_str(&fields, "name").unwrap_or_default()),
+        Value::from(fields.get("owner").and_then(|v| v.as_str())),
+        Value::from(i64::from(docstatus as i16)),
+        Value::from(now),
+        Value::from(now),
+        Value::from(fields.get("modified_by").and_then(|v| v.as_str())),
+        Value::from(fields.get("amended_from").and_then(|v| v.as_str())),
+        Value::from(fields.get("workflow_state").and_then(|v| v.as_str())),
+    ];
+    params.extend(column_values(&shape.columns, &document));
+    // `docstatus` is a SMALLINT on disk and a word in the document; the two are
+    // written from the same value.
     sink.execute(&Stmt::new(
         format!(
-            "INSERT INTO {quoted} (name, owner, docstatus, creation, modified, data) \
-             VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT INTO {quoted} \
+             (name, owner, docstatus, creation, modified, modified_by, amended_from, \
+              workflow_state{extra_columns}) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?{extra_placeholders})"
         ),
-        vec![
-            Value::from(field_str(&fields, "name").unwrap_or_default()),
-            Value::from(fields.get("owner").and_then(|v| v.as_str())),
-            Value::from(i64::from(docstatus as i16)),
-            Value::from(now),
-            Value::from(now),
-            Value::from(serialized),
-        ],
+        params,
     ))
     .await
     .map_err(|e| match &e {
@@ -204,7 +240,22 @@ pub(in crate::engine) async fn insert_row(
         _ => e,
     })?;
 
-    Ok(fields_to_value(fields))
+    let name = field_str(&fields, "name").unwrap_or_default();
+    write_children(sink, shape, &ctx.doctype, &name, &document).await?;
+    if prepared.index_search
+        && let Err(error) = search::index(sink, &ctx.doctype, &document).await
+    {
+        // The index is derived data: a document that was written stays written
+        // even when it could not be indexed. The next list search simply misses
+        // it until the next successful write.
+        tracing::warn!(
+            %error,
+            doctype = %ctx.doctype,
+            name = %name,
+            "document written but not indexed for full-text search"
+        );
+    }
+    Ok(document)
 }
 
 /// Run the after-insert points against a committed row.
@@ -223,19 +274,14 @@ pub(in crate::engine) async fn run_after_insert_hooks(
     Ok(())
 }
 
-/// The `data` blob every write persists: JSON with **sorted keys**.
+/// A JSON snapshot of `document` with **sorted keys**.
 ///
-/// `ferris_core::Value::Object` is a `HashMap`, so `serde_json::to_string` on it
-/// writes in iteration order, which is not stable between instances. The stored
-/// blob, the `data` a plugin event carries and `docstore::get`'s read-back have
-/// to be the *same string*, or the plugin's exact comparison fails although the
-/// content is identical ("stored data differs from the data I was given" from
-/// the `test` plugin's `after-save`). Going through `serde_json::to_value`
-/// reaches that canonical form because its `Map` is a `BTreeMap`.
-///
-/// Both places that write `data` — the INSERT in [`write_prepared`] and
-/// [`persist_written`] — must go through this one function; a second copy of
-/// the rule would drift and resurrect the ordering bug.
+/// Only historical snapshots (`tab_version`, `Deleted Document`) serialize a
+/// document now; the live table stores columns (ADR 0001). `Value::Object` is a
+/// `HashMap`, so `serde_json::to_string` on it writes in iteration order, which
+/// is not stable between instances. Going through `serde_json::to_value`
+/// reaches a canonical form because its `Map` is a `BTreeMap`, so a snapshot's
+/// hash and bytes do not depend on map iteration order.
 #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
 pub(in crate::engine) fn canonical_blob(document: &Value) -> Result<String> {
     let canonical: serde_json::Value = serde_json::to_value(document)

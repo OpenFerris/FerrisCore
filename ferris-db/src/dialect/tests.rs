@@ -39,17 +39,6 @@ fn quoting_preserves_case_so_migration_and_runtime_agree() {
 }
 
 #[test]
-fn escape_string_literal() {
-    assert_eq!(Dialect::Postgres.escape_string_literal("it's"), "it''s");
-    assert_eq!(Dialect::MySQL.escape_string_literal("a\\b"), "a\\\\b");
-    assert!(
-        !Dialect::Postgres
-            .escape_string_literal("a\\b")
-            .contains("\\\\")
-    );
-}
-
-#[test]
 fn ssl_param() {
     assert_eq!(
         Dialect::Postgres.ssl_param(SslMode::VerifyFull),
@@ -90,4 +79,46 @@ fn qualified_ident_validation() {
     assert!(!is_qualified_ident(".name"));
     assert!(!is_qualified_ident("tab.*"));
     assert!(!is_qualified_ident(""));
+}
+
+#[test]
+fn postgres_placeholders_are_numbered_in_order() {
+    let rendered = Dialect::Postgres.render_placeholders("SELECT * FROM t WHERE a = ? AND b = ?");
+    assert_eq!(rendered.as_ref(), "SELECT * FROM t WHERE a = $1 AND b = $2");
+}
+
+#[test]
+fn placeholders_inside_literals_identifiers_and_comments_are_left_alone() {
+    let sql = "SELECT '?', \"?\", `?` FROM t /* ? */ -- ?\n WHERE a = ?";
+    let rendered = Dialect::Postgres.render_placeholders(sql);
+    assert_eq!(rendered.matches("$1").count(), 1);
+    assert!(rendered.contains("'?'"));
+    assert!(rendered.contains("\"?\""));
+    assert!(rendered.contains("/* ? */"));
+    assert!(rendered.contains("-- ?"));
+    assert!(rendered.ends_with("a = $1"));
+}
+
+#[test]
+fn a_doubled_quote_does_not_close_a_literal() {
+    let rendered = Dialect::Postgres.render_placeholders("SELECT 'it''s ?' WHERE a = ?");
+    assert_eq!(rendered.as_ref(), "SELECT 'it''s ?' WHERE a = $1");
+}
+
+#[test]
+fn dollar_quoted_bodies_are_not_rewritten() {
+    let rendered = Dialect::Postgres.render_placeholders("SELECT $$?$$, $tag$?$tag$, ?");
+    assert_eq!(rendered.as_ref(), "SELECT $$?$$, $tag$?$tag$, $1");
+}
+
+#[test]
+fn other_dialects_keep_the_question_mark() {
+    assert_eq!(
+        Dialect::MySQL.render_placeholders("a = ?").as_ref(),
+        "a = ?"
+    );
+    assert_eq!(
+        Dialect::SQLite.render_placeholders("a = ?").as_ref(),
+        "a = ?"
+    );
 }

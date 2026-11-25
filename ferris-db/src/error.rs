@@ -80,8 +80,8 @@ pub fn is_connection_error(error: &sqlx::Error) -> bool {
 /// A statement or lock *timeout* is deliberately not retryable — the work is
 /// simply too slow, and retrying it turns a slow query into a hot loop.
 ///
-/// The `Any` driver erases the server's SQLSTATE down to a message, so this
-/// matches on the text the three backends emit.
+/// The drivers report these conditions as text rather than as a portable
+/// SQLSTATE, so this matches on the message the three backends emit.
 pub fn is_retryable_transaction(error: &sqlx::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("deadlock")

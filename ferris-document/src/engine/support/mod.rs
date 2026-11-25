@@ -15,7 +15,9 @@
 mod fields;
 mod hooks;
 mod perm;
+mod shape;
 mod sink;
+mod typed;
 mod virtual_fields;
 
 // Wider than `pub(crate)`: `engine/mod.rs` re-exports both, and `is_engine_field`
@@ -35,8 +37,14 @@ pub use virtual_fields::{
 pub(in crate::engine) use fields::*;
 pub(in crate::engine) use hooks::*;
 pub(in crate::engine) use perm::*;
+pub(in crate::engine) use shape::{DocShape, effective_context, normalized_fieldtype};
 pub(in crate::engine) use sink::{
-    canonical_blob, insert_row, read_row_via, run_after_insert_hooks, write_prepared,
+    canonical_blob, insert_row, read_row_via, read_row_with_shape_via, run_after_insert_hooks,
+    write_prepared,
+};
+pub(in crate::engine) use typed::{
+    column_list, column_placeholders, column_values, delete_children_via, nullable_column,
+    read_children, read_children_batch, update_set, write_children,
 };
 pub(in crate::engine) use virtual_fields::{
     finish_virtual_write, is_virtual, reject_virtual_field_writes, virtual_doctype_provider,

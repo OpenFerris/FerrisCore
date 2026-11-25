@@ -13,6 +13,7 @@ async fn cancelled_delete_leaves_a_tombstone_and_keeps_history() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let admin = sysadmin();
     let ctx = EngineContext::new("ToDo", "TODO-.#####").with_user(&admin);
@@ -72,6 +73,7 @@ async fn restore_reinserts_the_snapshot_and_records_the_restore() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let admin = sysadmin();
     let ctx = EngineContext::new("ToDo", "TODO-.#####").with_user(&admin);
@@ -140,6 +142,7 @@ async fn purge_requires_a_reason_and_audits_the_destruction() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let admin = sysadmin();
     let ctx = EngineContext::new("ToDo", "TODO-.#####").with_user(&admin);
@@ -201,6 +204,7 @@ async fn retention_does_not_purge_before_the_window() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let ctx = EngineContext::new("ToDo", "TODO-.#####").allow_anonymous(true);
 

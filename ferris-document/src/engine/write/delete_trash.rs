@@ -177,13 +177,18 @@ impl DocumentEngine {
                 "legal hold is active; purge is refused".to_string(),
             )));
         }
-        let table = self.ensure_table(&ctx.doctype).await?;
+        let table = self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
         self.ensure_runtime_tables().await?;
         let side_tables = self.existing_side_tables().await?;
+        // Resolved before the transaction opens: the read and the child cascade
+        // share it, and no metadata query may run on a second connection while
+        // this one is checked out.
+        let shape = DocShape::resolve(&self.db, &ctx.doctype, self.db.dialect(), ctx.meta).await?;
         let mut tx = self.db.begin().await?;
         let result = async {
             let (mut existing, owner_column) =
-                read_row_via(&mut WriteSink::Tx(&mut tx), &ctx.doctype, name).await?;
+                read_row_with_shape_via(&mut WriteSink::Tx(&mut tx), &shape, &ctx.doctype, name)
+                    .await?;
             let status = existing
                 .get("docstatus")
                 .and_then(|v| v.as_str())
@@ -228,6 +233,22 @@ impl DocumentEngine {
                     doctype: ctx.doctype.clone(),
                     name: name.to_string(),
                 }));
+            }
+            // A purge is the explicit, audited destruction of the document: its
+            // child rows go with it, or they would outlive it forever.
+            delete_children_via(&mut WriteSink::Tx(&mut tx), &shape, &ctx.doctype, name).await?;
+            if search::ready_for(&self.db, &ctx.doctype) {
+                let mut sink = WriteSink::Tx(&mut tx);
+                if let Err(error) = search::remove(&mut sink, &ctx.doctype, name).await {
+                    // Derived data: the purge itself must not fail because the
+                    // index could not forget the row.
+                    tracing::warn!(
+                        %error,
+                        doctype = %ctx.doctype,
+                        name,
+                        "purged document still present in the full-text index"
+                    );
+                }
             }
             for side in &side_tables {
                 if side == crate::versioning::TAB_VERSION {
@@ -288,11 +309,18 @@ impl DocumentEngine {
                 "only regular documents are stored in the trash".to_string(),
             )));
         }
-        let table = self.ensure_table(&ctx.doctype).await?;
+        let table = self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
         self.ensure_runtime_tables().await?;
+        let shape = DocShape::resolve(&self.db, &ctx.doctype, self.db.dialect(), ctx.meta).await?;
         let mut tx = self.db.begin().await?;
         match self
-            .restore_via(&mut WriteSink::Tx(&mut tx), &table, ctx, restore_token)
+            .restore_via(
+                &mut WriteSink::Tx(&mut tx),
+                &table,
+                ctx,
+                restore_token,
+                &shape,
+            )
             .await
         {
             Ok(value) => {
@@ -312,6 +340,7 @@ impl DocumentEngine {
         table: &str,
         ctx: &EngineContext<'_>,
         restore_token: &str,
+        shape: &DocShape,
     ) -> Result<Value> {
         let trash = q(sink.dialect(), TAB_DELETED_DOCUMENT)?;
         let row = sink
@@ -338,7 +367,7 @@ impl DocumentEngine {
                 tombstone.doctype, ctx.doctype
             ))));
         }
-        if read_row_via(sink, &ctx.doctype, &tombstone.docname)
+        if read_row_with_shape_via(sink, shape, &ctx.doctype, &tombstone.docname)
             .await
             .is_ok()
         {
@@ -356,21 +385,28 @@ impl DocumentEngine {
             .and_then(Value::as_str)
             .map(docstatus_from_str)
             .unwrap_or(DocStatus::Draft);
-        let blob = canonical_blob(&snapshot)?;
+        let extra_columns = column_list(&shape.columns, sink.dialect())?;
+        let extra_placeholders = column_placeholders(&shape.columns, sink.dialect());
+        let mut params = vec![
+            Value::from(tombstone.docname.as_str()),
+            owner.map_or(Value::Null, Value::from),
+            Value::from(i64::from(status as i16)),
+            Value::from(creation),
+            Value::from(now),
+            Value::from(snapshot.get("modified_by").and_then(Value::as_str)),
+            Value::from(snapshot.get("amended_from").and_then(Value::as_str)),
+            Value::from(snapshot.get("workflow_state").and_then(Value::as_str)),
+        ];
+        params.extend(column_values(&shape.columns, &snapshot));
         sink.execute(&Stmt::new(
             format!(
-                "INSERT INTO {} (name, owner, docstatus, creation, modified, data) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO {} \
+                 (name, owner, docstatus, creation, modified, modified_by, amended_from, \
+                  workflow_state{extra_columns}) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?{extra_placeholders})",
                 q(sink.dialect(), table)?
             ),
-            vec![
-                Value::from(tombstone.docname.as_str()),
-                owner.map_or(Value::Null, Value::from),
-                Value::from(i64::from(status as i16)),
-                Value::from(creation),
-                Value::from(now),
-                Value::from(blob),
-            ],
+            params,
         ))
         .await
         .map_err(|e| match &e {
@@ -382,6 +418,19 @@ impl DocumentEngine {
             }
             _ => e,
         })?;
+        // The snapshot carries the child arrays; restore their real rows too.
+        write_children(sink, shape, &ctx.doctype, &tombstone.docname, &snapshot).await?;
+        // The restored row is live again, so it must be findable again.
+        if search::ready_for(&self.db, &ctx.doctype)
+            && let Err(error) = search::index(sink, &ctx.doctype, &snapshot).await
+        {
+            tracing::warn!(
+                %error,
+                doctype = %ctx.doctype,
+                name = %tombstone.docname,
+                "restored document not indexed for full-text search"
+            );
+        }
         self.record_version(
             sink,
             ctx,

@@ -9,6 +9,21 @@
 //! Secret-dependent comparisons belong here, not inline at the call site, so
 //! that "is this comparison constant-time?" has a single answer.
 
+use sha2::{Digest, Sha256};
+
+/// SHA-256 of `bytes`, as 64 lowercase hexadecimal characters.
+///
+/// Used for credentials that do not need a password hash: a 32-byte
+/// machine-generated secret already carries far more entropy than the search
+/// space a slow KDF protects, and hashing it with Argon2 on every request was
+/// pure latency (AUTH12). The digest is compared with [`constant_time_eq`].
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    data_encoding::HEXLOWER.encode(&hasher.finalize())
+}
+
 /// Constant-time byte comparison.
 ///
 /// Returns as soon as the lengths differ — length is not secret in these uses
@@ -39,5 +54,27 @@ mod tests {
         assert!(!constant_time_eq(b"abc123", b"abc12"));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn sha256_hex_is_lowercase_and_stable() {
+        // Well-known vector: the digest of the empty input.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(sha256_hex(b"abc"), sha256_hex(b"abc"));
+        assert_ne!(sha256_hex(b"abc"), sha256_hex(b"abd"));
+        assert_eq!(sha256_hex(b"abc").len(), 64);
+        assert!(
+            sha256_hex(b"anything")
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        );
+        assert!(
+            !sha256_hex(b"anything")
+                .bytes()
+                .any(|b| b.is_ascii_uppercase())
+        );
     }
 }

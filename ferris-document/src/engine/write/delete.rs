@@ -64,7 +64,7 @@ impl DocumentEngine {
         if legal_hold_from_env() {
             return Err(legal_hold_error());
         }
-        let table = self.ensure_table(&ctx.doctype).await?;
+        let table = self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
         self.ensure_runtime_tables().await?;
         // The side tables are created lazily, so only the ones that exist are
         // cleaned. Discovered before the transaction so a batch cascades the
@@ -130,7 +130,11 @@ impl DocumentEngine {
         if legal_hold_from_env() {
             return Err(legal_hold_error());
         }
-        let (mut existing, owner_column) = read_row_via(sink, &ctx.doctype, name).await?;
+        // One shape for the whole operation: the read below and the child
+        // cascade at the end must agree on the same `Table` fields.
+        let shape = DocShape::resolve(&self.db, &ctx.doctype, sink.dialect(), ctx.meta).await?;
+        let (mut existing, owner_column) =
+            read_row_with_shape_via(sink, &shape, &ctx.doctype, name).await?;
 
         let status = existing
             .get("docstatus")
@@ -152,6 +156,10 @@ impl DocumentEngine {
             Permission::Delete,
         )
         .await?;
+        // The owner/role decision says "may delete this DocType"; the stored
+        // row decides *which* row. Without this, a `User Permission` was a
+        // read-only illusion for deletes.
+        enforce_user_permission(ctx, &existing, Permission::Delete)?;
         run_hooks(ctx, name, &mut existing, false, HookPoint::BeforeDelete).await?;
 
         // Only a cancelled document is booked evidence; its snapshot goes to
@@ -173,6 +181,22 @@ impl DocumentEngine {
                 doctype: ctx.doctype.clone(),
                 name: name.to_string(),
             }));
+        }
+        // The document is gone, so nothing may keep pointing at it: the child
+        // rows are unreachable without their parent and would resurface under a
+        // reused name. Same transaction, so a failed hook still rolls them back.
+        delete_children_via(sink, &shape, &ctx.doctype, name).await?;
+        if search::ready_for(&self.db, &ctx.doctype)
+            && let Err(error) = search::remove(sink, &ctx.doctype, name).await
+        {
+            // The row is gone either way; a stale index entry can only make a
+            // search return a name the SQL then fails to find.
+            tracing::warn!(
+                %error,
+                doctype = %ctx.doctype,
+                name,
+                "document deleted but still present in the full-text index"
+            );
         }
         for side in side_tables {
             // The cancelled document's history is the audit trail the tombstone

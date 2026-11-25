@@ -16,11 +16,11 @@ use std::collections::HashSet;
 
 use ferris_core::permissions::{PermissionRule, STANDARD_ROLES, SYSTEM_MANAGER_ROLE};
 use ferris_core::{Error, Result, SerializationError, ValidationError, Value};
-use ferris_db::sql::Ident;
+use ferris_db::sql::{Column, Ident};
 use ferris_db::{Db, Stmt};
 use ferris_schema::contract::{CustomPermissionGrant, PermissionMatrix};
 
-use crate::custom_docperm::{all, effective_permissions, rule_from_value};
+use crate::custom_docperm::{effective_permissions, for_doctype, rule_from_row};
 use crate::store::DocStore;
 
 const CUSTOM_DOC_PERM_TABLE: &str = "tabCustomDocPerm";
@@ -53,15 +53,14 @@ pub async fn matrix(
         .map(|permission| permission.perm_type)
         .collect();
     let roles = roles(pool).await?;
-    let overrides = all(pool).await?;
-    let granted: HashSet<(String, String)> = overrides
-        .get(doctype)
+    let granted: HashSet<(String, String)> = for_doctype(pool, doctype)
+        .await?
         .into_iter()
-        .flatten()
         .flat_map(|(rule, _)| {
+            let role = rule.role;
             rule.custom_permissions
-                .iter()
-                .map(|perm_type| (perm_type.clone(), rule.role.clone()))
+                .into_iter()
+                .map(move |perm_type| (perm_type, role.clone()))
         })
         .collect();
     let grants = perm_types
@@ -119,8 +118,7 @@ pub async fn set_grant(
         )));
     };
 
-    if let Some((row_name, mut data)) = find_custom_row(pool, doctype, role).await? {
-        let (mut rule, _) = rule_from_value(&data)?;
+    if let Some((row_name, mut rule)) = find_custom_row(pool, doctype, role).await? {
         if granted {
             if !rule
                 .custom_permissions
@@ -132,11 +130,7 @@ pub async fn set_grant(
         } else {
             rule.custom_permissions.retain(|value| value != perm_type);
         }
-        data.set(
-            "custom_permissions".to_string(),
-            Value::from(serialized_list(&rule.custom_permissions)?),
-        );
-        persist_row(pool, &row_name, &data).await?;
+        persist_row(pool, doctype, &row_name, &rule.custom_permissions).await?;
         return Ok(());
     }
 
@@ -156,7 +150,40 @@ pub async fn set_grant(
         });
     rule.role = role.to_string();
     rule.custom_permissions = vec![perm_type.to_string()];
-    DocStore::create(pool, "Custom DocPerm", rule_payload(&rule, doctype)?).await?;
+    let created = DocStore::create(pool, "Custom DocPerm", rule_payload(&rule, doctype)?).await?;
+    let name = created
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if name.is_empty() {
+        return Err(Error::Validation(ValidationError::Invalid(
+            "the created Custom DocPerm row has no name".to_string(),
+        )));
+    }
+    set_target(pool, name, doctype).await?;
+    Ok(())
+}
+
+/// Pin a `Custom DocPerm` row to the DocType it overrides.
+///
+/// `parent` is the row's real link to its DocType, but the document engine
+/// treats it as a structural field and leaves it out of a non-child table's
+/// stored columns, so a row created through [`DocStore`] does not carry it.
+/// The declared column exists on a migrated site; `ensure_column` covers a
+/// table the engine created lazily before the migration ran, and tolerates the
+/// column already being there.
+async fn set_target(pool: &Db, name: &str, doctype: &str) -> Result<()> {
+    let quoted = Ident::new(CUSTOM_DOC_PERM_TABLE)?.quote(pool.dialect());
+    pool.ensure_column(
+        CUSTOM_DOC_PERM_TABLE,
+        &Column::new("parent", "VARCHAR(255)"),
+    )
+    .await?;
+    pool.execute(&Stmt::new(
+        format!("UPDATE {quoted} SET parent = ? WHERE name = ?"),
+        vec![Value::from(doctype), Value::from(name)],
+    ))
+    .await?;
     Ok(())
 }
 
@@ -192,44 +219,56 @@ async fn roles(pool: &Db) -> Result<Vec<String>> {
 }
 
 /// The stored `Custom DocPerm` row for `(doctype, role, permlevel 0)`, if any.
-async fn find_custom_row(pool: &Db, doctype: &str, role: &str) -> Result<Option<(String, Value)>> {
+///
+/// Rows are read as their real columns, never from a `data` blob (ADR 0001):
+/// the selection and the rule decoding both go through the column names, so a
+/// `SELECT *` is enough and a partial schema reads the missing right columns as
+/// their defaults. `parent` and `role` are the indexed lookup keys, and
+/// `COALESCE(permlevel, 0) = 0` keeps a `NULL` level meaning level 0 exactly as
+/// [`rule_from_row`] decodes it.
+async fn find_custom_row(
+    pool: &Db,
+    doctype: &str,
+    role: &str,
+) -> Result<Option<(String, PermissionRule)>> {
     if !pool.table_exists(CUSTOM_DOC_PERM_TABLE).await? {
         return Ok(None);
     }
     let quoted = Ident::new(CUSTOM_DOC_PERM_TABLE)?.quote(pool.dialect());
-    let rows = pool
-        .fetch_all(&Stmt::new(
-            format!("SELECT name, data FROM {quoted} ORDER BY name"),
-            Vec::new(),
+    let row = pool
+        .fetch_optional(&Stmt::new(
+            format!(
+                "SELECT * FROM {quoted} \
+                 WHERE parent = ? AND role = ? AND COALESCE(permlevel, 0) = 0 \
+                 ORDER BY name LIMIT 1"
+            ),
+            vec![Value::from(doctype), Value::from(role)],
         ))
         .await?;
-    for row in rows {
-        let data = row.str("data")?;
-        let value: Value = serde_json::from_str(&data)
-            .map_err(|error| Error::Serialization(SerializationError::Json(error)))?;
-        let same_parent = value.get("parent").and_then(Value::as_str) == Some(doctype);
-        let same_role = value.get("role").and_then(Value::as_str) == Some(role);
-        let level = value
-            .get("permlevel")
-            .and_then(Value::as_i64)
-            .unwrap_or_default();
-        if same_parent && same_role && level == 0 {
-            return Ok(Some((row.str("name")?, value)));
-        }
-    }
-    Ok(None)
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let (rule, _) = rule_from_row(&row)?;
+    Ok(Some((row.str("name")?, rule)))
 }
 
-async fn persist_row(pool: &Db, name: &str, data: &Value) -> Result<()> {
+/// Rewrite only the `custom_permissions` column of a stored row.
+///
+/// The rest of the row (the role's rights, `select`, `permlevel`) is left
+/// untouched, so granting a permission type cannot silently drop a right. The
+/// effective metadata embeds `Custom DocPerm`, so a write bumps the generation
+/// exactly like the generic `DocStore` path does.
+async fn persist_row(
+    pool: &Db,
+    doctype: &str,
+    name: &str,
+    custom_permissions: &[String],
+) -> Result<()> {
     let quoted = Ident::new(CUSTOM_DOC_PERM_TABLE)?.quote(pool.dialect());
-    let canonical: serde_json::Value = serde_json::to_value(data)
-        .map_err(|error| Error::Serialization(SerializationError::Json(error)))?;
-    let serialized = serde_json::to_string(&canonical)
-        .map_err(|error| Error::Serialization(SerializationError::Json(error)))?;
     pool.execute(&Stmt::new(
-        format!("UPDATE {quoted} SET data = ?, modified = ? WHERE name = ?"),
+        format!("UPDATE {quoted} SET custom_permissions = ?, modified = ? WHERE name = ?"),
         vec![
-            Value::from(serialized),
+            Value::from(serialized_list(custom_permissions)?),
             Value::from(chrono::Utc::now().timestamp()),
             Value::from(name),
         ],
@@ -238,13 +277,7 @@ async fn persist_row(pool: &Db, name: &str, data: &Value) -> Result<()> {
     // The effective metadata embeds `Custom DocPerm`; a write must bump the
     // per-DocType generation or the cached copy keeps serving the old policy
     // (PERF-03/SCH-04).
-    if let Some(doctype) = data
-        .get("document_type")
-        .or_else(|| data.get("parent"))
-        .and_then(Value::as_str)
-    {
-        ferris_schema::customization::CustomizationStore::invalidate_meta(doctype);
-    }
+    ferris_schema::customization::CustomizationStore::invalidate_meta(doctype);
     Ok(())
 }
 

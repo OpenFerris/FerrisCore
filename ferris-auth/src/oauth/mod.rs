@@ -1,14 +1,24 @@
-//! OAuth2/OpenID Connect integration.
+//! `OAuth2` + userinfo integration.
+//!
+//! This crate implements the `OAuth2` authorization-code flow and reads the
+//! caller's identity from the provider's **userinfo** endpoint. It is *not*
+//! OpenID Connect: an `id_token` returned by the token endpoint is **never
+//! validated** — its signature is not checked against JWKS, and `iss`, `aud`,
+//! `nonce` and `exp` are not verified. A provider config that advertises OIDC
+//! (`oidc = true`) is refused at construction instead of having its token
+//! silently ignored.
 //!
 //! Split into focused fragments: [`client`] owns the per-provider HTTP client
 //! (PKCE, token exchange, refresh, userinfo), [`manager`] owns provider lookup
-//! and the server-side state store, and this module holds the shared wire types
-//! and the PKCE verifier helper. `mod.rs` only declares and re-exports, so every
-//! existing `crate::oauth::Thing` path keeps resolving.
+//! and the server-side state store, [`state_store`] the in-memory/DB state
+//! backends, and this module holds the shared wire types and the PKCE verifier
+//! helper. `mod.rs` only declares and re-exports, so every existing
+//! `crate::oauth::Thing` path keeps resolving.
 
 mod client;
 mod cookie;
 mod manager;
+mod state_store;
 
 pub use client::{OAuthClient, TokenResponse};
 pub use cookie::{NEXT_COOKIE, STATE_COOKIE, clear_cookie, flow_cookie};
@@ -37,6 +47,29 @@ pub struct OAuthProviderConfig {
     /// never derived from the provider URL (avoids open redirects).
     #[serde(default)]
     pub redirect_uris: Vec<String>,
+    /// Require userinfo to report `email_verified: true` before the email is
+    /// trusted to resolve a local account.
+    ///
+    /// The default is `true`: a provider that never says the address was
+    /// verified is not proving it, and the login would otherwise be an
+    /// account-takeover vector. Only a provider whose userinfo carries no such
+    /// claim **and** whose addresses are verified by other means should opt out.
+    #[serde(default = "default_true")]
+    pub require_verified_email: bool,
+    /// Whether this provider is expected to be used as OIDC.
+    ///
+    /// `id_token` validation (JWKS signature, `iss`/`aud`/`nonce`/`exp`) is not
+    /// implemented. This flag exists so a config that needs OIDC fails loudly at
+    /// [`OAuthManager::new`](manager::OAuthManager::new) instead of having its
+    /// `id_token` silently ignored. Defaults to `false`, which keeps every
+    /// existing config working unchanged.
+    #[serde(default)]
+    pub oidc: bool,
+}
+
+/// `true`, the secure default for [`OAuthProviderConfig::require_verified_email`].
+const fn default_true() -> bool {
+    true
 }
 
 impl fmt::Debug for OAuthProviderConfig {
@@ -53,6 +86,8 @@ impl fmt::Debug for OAuthProviderConfig {
             .field("pkce_enabled", &self.pkce_enabled)
             .field("pkce_method", &self.pkce_method)
             .field("redirect_uris", &self.redirect_uris)
+            .field("require_verified_email", &self.require_verified_email)
+            .field("oidc", &self.oidc)
             .finish()
     }
 }

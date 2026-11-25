@@ -12,7 +12,7 @@
 //! * `install_policies_with_role_permissions` folds them into the runtime
 //!   policy.
 //!
-//! Both go through [`merge_rules`] and [`rule_from_value`], the only two places
+//! Both go through [`merge_rules`] and [`rule_from_row`], the only two places
 //! that decide what an override means.
 
 // `ferris_core::Error` is the shared taxonomy; boxing it would make every
@@ -23,7 +23,7 @@ use crate::DoctypeMeta;
 use ferris_core::permissions::PermissionRule;
 use ferris_core::{Error, Result, SerializationError, ValidationError, Value};
 use ferris_db::sql::Ident;
-use ferris_db::{Db, Stmt};
+use ferris_db::{Db, Row, Stmt};
 
 /// Whether `user` holds the custom permission `perm_type` on `doctype`.
 ///
@@ -94,12 +94,51 @@ pub async fn has_custom_permission_on(
 /// keep. Malformed `custom_permissions` JSON is a serialization error, never a
 /// silently empty grant.
 pub async fn apply(pool: &Db, doctype: &str, meta: &mut DoctypeMeta) -> Result<()> {
-    let mut overrides = all(pool).await?;
-    merge_rules(
-        &mut meta.permissions,
-        overrides.remove(doctype).unwrap_or_default(),
-    );
+    let overrides = for_doctype(pool, doctype).await?;
+    merge_rules(&mut meta.permissions, overrides);
     Ok(())
+}
+
+/// The `Custom DocPerm` overrides of **one** DocType.
+///
+/// [`all`] is the right reader only when every row is needed (the runtime
+/// policy install). Everything that resolves a single DocType — the effective
+/// metadata of a form, `has_custom_permission`, the role matrix — goes through
+/// this one: the table is indexed by `parent`, and a site with many overrides
+/// should not decode all of them to find one.
+///
+/// # Errors
+///
+/// A malformed stored row or a database failure.
+pub async fn for_doctype(pool: &Db, doctype: &str) -> Result<Vec<(PermissionRule, bool)>> {
+    let mut rules = Vec::new();
+    let Some(rows) = rows_for(pool, Some(doctype)).await? else {
+        return Ok(rules);
+    };
+    for row in rows {
+        rules.push(rule_from_row(&row)?);
+    }
+    Ok(rules)
+}
+
+/// `SELECT *` over `Custom DocPerm`, optionally narrowed to one `parent`.
+///
+/// `Ok(None)` means the table does not exist yet, which the callers read as
+/// "no overrides" rather than as a failure.
+async fn rows_for(pool: &Db, doctype: Option<&str>) -> Result<Option<Vec<Row>>> {
+    const TABLE: &str = "tabCustomDocPerm";
+    if !pool.table_exists(TABLE).await? {
+        return Ok(None);
+    }
+    let quoted = Ident::new(TABLE)?.quote(pool.dialect());
+    let stmt = match doctype {
+        Some(doctype) => Stmt::new(
+            format!("SELECT * FROM {quoted} WHERE parent = ? ORDER BY name"),
+            vec![Value::from(doctype)],
+        ),
+        None => Stmt::new(format!("SELECT * FROM {quoted} ORDER BY name"), Vec::new()),
+    };
+    Ok(Some(pool.fetch_all(&stmt).await?))
 }
 
 /// Fold `Custom DocPerm` overrides into a permission list.
@@ -147,8 +186,7 @@ pub async fn effective_permissions(
         return Ok(None);
     };
     let mut rules = meta.permissions.clone();
-    let mut overrides = all(pool).await?;
-    merge_rules(&mut rules, overrides.remove(doctype).unwrap_or_default());
+    merge_rules(&mut rules, for_doctype(pool, doctype).await?);
     Ok(Some(rules))
 }
 
@@ -160,35 +198,35 @@ pub async fn effective_permissions(
 ///
 /// The policy install uses this to fold the overrides into the *runtime*
 /// engine, not only into the metadata payload; `effective_meta` uses the
-/// per-DocType query below. Both share [`custom_doc_perm_rule`], so the two
-/// readers cannot disagree about what a row means.
+/// per-DocType query below. Both share [`rule_from_row`], so the two readers
+/// cannot disagree about what a row means.
+///
+/// The row is read as its real columns (ADR 0001): there is no `data` blob to
+/// decode. `SELECT *` keeps the reader working over the subset a test or an
+/// older install created; a missing right column reads as its default, while a
+/// missing `parent` is a schema mismatch and fails instead of dropping every
+/// override.
 pub async fn all(
     pool: &Db,
 ) -> Result<std::collections::HashMap<String, Vec<(PermissionRule, bool)>>> {
-    const TABLE: &str = "tabCustomDocPerm";
     let mut overrides = std::collections::HashMap::new();
-    if !pool.table_exists(TABLE).await? {
+    let Some(rows) = rows_for(pool, None).await? else {
         return Ok(overrides);
-    }
-    let quoted = Ident::new(TABLE)?.quote(pool.dialect());
-    let rows = pool
-        .fetch_all(&Stmt::new(
-            format!("SELECT data FROM {quoted} ORDER BY name"),
-            Vec::new(),
-        ))
-        .await?;
+    };
     for row in rows {
-        let data = row.str("data")?;
-        let value: Value = serde_json::from_str(&data)
-            .map_err(|error| Error::Serialization(SerializationError::Json(error)))?;
-        let Some(parent) = value.get("parent").and_then(Value::as_str) else {
+        if !row.has("parent") {
+            return Err(Error::Validation(ValidationError::Invalid(
+                "tabCustomDocPerm has no `parent` column".to_string(),
+            )));
+        }
+        let Some(parent) = row.opt_str("parent") else {
             continue;
         };
         let parent = parent.trim();
         if parent.is_empty() {
             continue;
         }
-        let (rule, select) = rule_from_value(&value)?;
+        let (rule, select) = rule_from_row(&row)?;
         overrides
             .entry(parent.to_string())
             .or_insert_with(Vec::new)
@@ -199,59 +237,33 @@ pub async fn all(
 
 /// Decode one `Custom DocPerm` row into a rule plus its `select` flag.
 ///
+/// Every value comes from its typed column: the booleans through `opt_bool`
+/// (SQLite hands `BOOLEAN` back as an integer), `permlevel` through `opt_i64`
+/// and the JSON array through `opt_str`. A `NULL` or absent column is the
+/// rule default, which is the same meaning an empty field has in the Desk.
+///
 /// # Errors
 ///
 /// A missing role, an out-of-range `permlevel` or malformed `custom_permissions`.
-pub fn rule_from_value(value: &Value) -> Result<(PermissionRule, bool)> {
-    let role = value
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+pub fn rule_from_row(row: &Row) -> Result<(PermissionRule, bool)> {
+    let role = row.opt_str("role").unwrap_or_default().trim().to_string();
     if role.is_empty() {
         return Err(Error::Validation(ValidationError::Invalid(
             "a Custom DocPerm row needs a role".to_string(),
         )));
     }
-    let flag = |name: &str| {
-        value.get(name).is_some_and(|value| match value {
-            Value::Bool(flag) => *flag,
-            Value::Number(number) => number.as_i64().is_some_and(|n| n != 0),
-            Value::String(text) => text == "1" || text.eq_ignore_ascii_case("true"),
-            Value::Null | Value::Array(_) | Value::Object(_) => false,
-        })
-    };
-    let permlevel = value
-        .get("permlevel")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            value
-                .get("permlevel")
-                .and_then(Value::as_str)
-                .and_then(|text| text.parse().ok())
-        })
-        .unwrap_or(0);
+    let flag = |name: &str| row.opt_bool(name).unwrap_or(false);
+    let permlevel = row.opt_i64("permlevel").unwrap_or(0);
     let permlevel = u8::try_from(permlevel).map_err(|_| {
         Error::Validation(ValidationError::Invalid(format!(
             "Custom DocPerm permlevel {permlevel} is out of range"
         )))
     })?;
-    let mut custom_permissions = match value
-        .get("custom_permissions")
-        .and_then(Value::as_str)
-        .map(str::trim)
-    {
+    let custom_permissions = match row.opt_str("custom_permissions").as_deref().map(str::trim) {
         Some(text) if !text.is_empty() => serde_json::from_str::<Vec<String>>(text)
             .map_err(|error| Error::Serialization(SerializationError::Json(error)))?,
         _ => Vec::new(),
     };
-    // `mask` is a standard DocPerm checkbox in Frappe. Ferris represents every
-    // non-flag right as a name in `custom_permissions`, so a mask grant is the
-    // same list entry the effective metadata and the Desk matrix already read.
-    if flag("mask") && !custom_permissions.iter().any(|granted| granted == "mask") {
-        custom_permissions.push("mask".to_string());
-    }
     Ok((
         PermissionRule {
             role,

@@ -1,6 +1,8 @@
+use crate::filters::{FilterOp, ListFilter};
 use ferris_core::Value;
+use ferris_schema::FieldMeta;
 
-/// The columns a `tab<DocType>` table really has.
+/// The engine columns a `tab<DocType>` table always has.
 ///
 /// Derived from [`ferris_schema::migration::document_columns`]; kept as an
 /// explicit allow-list rather than derived at run time because this is the set
@@ -8,9 +10,25 @@ use ferris_core::Value;
 /// the Rust path instead of producing a statement against a column that does
 /// not exist.
 ///
+/// Declared fields own real columns too, but which ones exist is per-DocType
+/// metadata ([`Plan::build`]'s `columns`) rather than a fixed list.
+///
 /// **Having a column is not the same as being able to filter on it** — see
 /// [`FILTERABLE_FIELDS`].
-pub const COLUMN_FIELDS: [&str; 5] = ["name", "owner", "docstatus", "creation", "modified"];
+pub const COLUMN_FIELDS: [&str; 8] = [
+    "name",
+    "owner",
+    "docstatus",
+    "creation",
+    "modified",
+    "modified_by",
+    "amended_from",
+    "workflow_state",
+];
+
+/// The system columns every `SELECT` projects, so the engine can rebuild the
+/// document from them. Declared field columns are appended by [`Plan::build`].
+pub const SELECT_COLUMNS: [&str; 8] = COLUMN_FIELDS;
 
 /// Columns whose stored representation matches the document's.
 ///
@@ -47,23 +65,16 @@ pub(crate) enum Predicate {
         column: String,
         value: Value,
     },
-    /// Exact value of `data.field` for a field the DocType declares indexed.
-    JsonEq {
-        field: String,
-        value: Value,
-    },
-    /// `data.field` is one of a list; the same declaration as [`Self::JsonEq`].
-    JsonIn {
-        field: String,
-        values: Vec<String>,
-    },
     Like {
         column: String,
         needle: String,
     },
+    /// `column IN (...)`. Values are typed because a declared field's column is
+    /// `BIGINT`/`DOUBLE`/`BOOLEAN` as often as it is text, and binding `"1"`
+    /// against `BIGINT` fails on PostgreSQL.
     In {
         column: String,
-        values: Vec<String>,
+        values: Vec<Value>,
     },
     Gt {
         column: String,
@@ -96,7 +107,7 @@ pub struct Residual {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidualReason {
-    /// The field lives inside the `data` blob and has no column.
+    /// The field has no column in the DocType's table.
     NotAColumn,
     /// The field has a column, but it stores the value in a different
     /// representation from the document — see [`FILTERABLE_FIELDS`].
@@ -109,55 +120,46 @@ pub enum ResidualReason {
     Disjunction,
     /// The requested ordering field has no column.
     OrderByNotAColumn,
-    /// `LIKE` over an indexed JSON field. The index is exact-text, so a
-    /// leading wildcard cannot use it, and the Rust substring match has no
-    /// need to be duplicated in SQL — it stays in Rust.
-    JsonLikeNotPushed,
-    /// A range (`gt`/`gte`/`lt`/`lte`) over an indexed JSON field. The Rust
-    /// comparator (`filters::cmp`) is numeric when both sides parse as a
-    /// number and case-insensitive otherwise; SQL text comparison would return
-    /// a different set, so ranges are never pushed even for indexed fields.
-    JsonRangeNotPushed,
-    /// An exact (`=`/`in`) filter over an indexed JSON field whose *value*
-    /// the SQL round trip cannot reproduce exactly. The Rust evaluator reads a
-    /// missing cell as `""` (`cell_str`) and coerces numbers/booleans to text;
-    /// a SQL equality against the JSON expression instead sees `NULL` for an
-    /// absent field and the raw JSON type otherwise. A timestamp has the same
-    /// problem: the evaluator compares it at the precision the filter names,
-    /// while the index compares the literal text. Pushing it would narrow the
-    /// result set the Rust filter would have kept, so it stays in Rust.
-    JsonExactNotPushed,
+    /// The filter value cannot be coerced to the declared column's type. A
+    /// wrong-typed bound value either fails at the database or (worse) compares
+    /// against a different domain than the Rust evaluator, so the filter stays
+    /// in Rust instead.
+    ValueNotCoercible,
+    /// The equality uses `""`, which the Rust evaluator also matches for a
+    /// missing cell. A column stores `NULL` for that case, and `column = ''`
+    /// never matches `NULL`.
+    EmptyStringNotPushed,
+    /// The filter is a timestamp, and its comparison is precision-aware in
+    /// Rust (`equals 12:34` matches `12:34:56`). A `Datetime` column stores the
+    /// literal text, so the SQL comparison cannot reproduce that.
+    TimestampNotPushed,
 }
 
 impl ResidualReason {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::NotAColumn => "field has no column; it lives in the document blob",
+            Self::NotAColumn => "field has no column in the document table",
             Self::RepresentedDifferently => {
                 "column stores this field in another representation than the document"
             }
             Self::UnsupportedOperator => "operator has no portable SQL equivalent",
             Self::Disjunction => "filters form an OR group; a WHERE can only AND",
             Self::OrderByNotAColumn => "order_by field has no column",
-            Self::JsonLikeNotPushed => {
-                "LIKE over an indexed JSON field cannot use its exact-text index"
+            Self::ValueNotCoercible => "filter value cannot be bound as the declared column's type",
+            Self::EmptyStringNotPushed => {
+                "empty equality also matches a missing cell in Rust, not a SQL NULL"
             }
-            Self::JsonRangeNotPushed => {
-                "range over an indexed JSON field would change Rust comparison semantics"
-            }
-            Self::JsonExactNotPushed => {
-                "exact match over an indexed JSON field would change Rust equality semantics"
+            Self::TimestampNotPushed => {
+                "timestamp comparison uses the filter's precision, which the text column cannot express"
             }
         }
     }
 }
 
-/// What an `ORDER BY` may name: a real column, or a field the DocType declares
-/// indexed so the database can order by its JSON value.
+/// What an `ORDER BY` may name: a real column (system or declared).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum OrderKey {
     Column(String),
-    JsonField(String),
 }
 
 /// The SQL half of a list request: a `WHERE` body, an `ORDER BY` and a page.
@@ -170,6 +172,9 @@ pub(crate) enum OrderKey {
 pub struct Plan {
     pub(crate) predicates: Vec<Predicate>,
     pub(crate) order_by: Option<(OrderKey, bool)>,
+    /// The columns the `SELECT` projects: the system columns plus every
+    /// declared field column, so the engine can rebuild the document.
+    pub(crate) projection: Vec<String>,
     /// `true` when the ORDER BY field had no column and ordering happens in Rust.
     pub(crate) order_in_rust: bool,
     /// How many filters stayed behind for the Rust filter to apply. Kept on the
@@ -241,9 +246,7 @@ fn timestamp_range(text: &str) -> Option<(i64, Option<i64>)> {
 /// faithful SQL spelling (`like`/`in` over a timestamp) or because the value is
 /// not one this module can convert. Keeping the fallback visible is what stops
 /// a conversion bug from silently shrinking a result set.
-pub(super) fn represented_filter(filter: &crate::filters::ListFilter) -> Option<Vec<Predicate>> {
-    use crate::filters::FilterOp;
-
+pub(super) fn represented_filter(filter: &ListFilter) -> Option<Vec<Predicate>> {
     if !REPRESENTED_FIELDS.contains(&filter.field.as_str()) {
         return None;
     }
@@ -320,4 +323,135 @@ pub(super) fn represented_equality(field: &str, value: &Value) -> Option<Value> 
         return None;
     }
     docstatus_code(value).map(Value::from)
+}
+
+/// The declared field `field`, if the `DocType` gave it a physical column.
+///
+/// `columns` is the caller's [`super::Plan::build`] argument: the stored
+/// fields for this `DocType` and dialect (`engine::support::stored_fields`).
+/// A declared field that is layout-only, virtual or a child table is absent,
+/// so it correctly falls back to the Rust path.
+pub(super) fn declared_column<'a>(columns: &'a [FieldMeta], field: &str) -> Option<&'a FieldMeta> {
+    columns.iter().find(|column| column.fieldname == field)
+}
+
+/// A field's canonical fieldtype, matching what the schema used to pick its
+/// column type.
+fn fieldtype(field: &FieldMeta) -> &str {
+    ferris_schema::fieldtype::canonical(&field.fieldtype).unwrap_or_else(|| field.fieldtype.trim())
+}
+
+/// Whether the column stores a JSON number that SQL compares numerically.
+pub(super) fn is_numeric_column(field: &FieldMeta) -> bool {
+    matches!(fieldtype(field), "Int" | "Float" | "Currency" | "Percent")
+}
+
+/// Whether the column stores text, so `LIKE` has the Rust evaluator's meaning.
+pub(super) fn is_text_column(field: &FieldMeta) -> bool {
+    !is_numeric_column(field) && fieldtype(field) != "Check"
+}
+
+fn int_value(value: &Value) -> Option<i64> {
+    value.as_i64().or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| text.trim().parse::<i64>().ok())
+    })
+}
+
+fn float_value(value: &Value) -> Option<f64> {
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))?;
+    number.is_finite().then_some(number)
+}
+
+fn bool_value(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        // `parse_list_filters` hands the needle over as text, and `cell_str`
+        // renders a stored boolean as exactly `true`/`false`. Any other
+        // spelling (`1`, `yes`, `True`) matches nothing in Rust, so binding it
+        // as a boolean would start matching rows the evaluator rejects.
+        Value::String(text) if text == "true" => Some(true),
+        Value::String(text) if text == "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn text_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        // `column_value` stores every non-string as its JSON text; the filter
+        // side uses the same representation so the comparison stays exact.
+        other => Some(other.to_json().to_string()),
+    }
+}
+
+/// A filter value as the value its declared column binds.
+///
+/// `None` means the value cannot be represented in the column's type. The
+/// caller keeps that filter in Rust rather than binding a `TEXT` value to a
+/// `BIGINT` column (which PostgreSQL rejects) or a value from the wrong domain
+/// (which would silently change the row set).
+pub(super) fn coerce_column_value(field: &FieldMeta, value: &Value) -> Option<Value> {
+    match fieldtype(field) {
+        "Int" => int_value(value).map(Value::from),
+        "Float" | "Currency" | "Percent" => float_value(value).map(Value::from),
+        "Check" => bool_value(value).map(Value::from),
+        _ => text_value(value).map(Value::from),
+    }
+}
+
+/// Whether an equality is the `""` the Rust evaluator also matches for a
+/// missing cell.
+pub(super) fn is_empty_string(value: &Value) -> bool {
+    value.as_str().is_some_and(str::is_empty)
+}
+
+fn is_date_only(text: &str) -> bool {
+    chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").is_ok()
+}
+
+/// Whether a precision-aware Rust timestamp comparison would differ from the
+/// column's text comparison.
+///
+/// `Date` columns are validated to date-only text, so a date-only needle is
+/// the same comparison in both places. Every other timestamp value (and every
+/// `Datetime`, whose stored offsets/spellings text does not order like an
+/// instant) stays in Rust.
+pub(super) fn timestamp_guard(
+    field: &FieldMeta,
+    value: &Value,
+) -> std::result::Result<(), ResidualReason> {
+    if !is_text_column(field) {
+        // A numeric/boolean column cannot round-trip a timestamp at all; the
+        // type coercion below is the honest reason to report.
+        return Ok(());
+    }
+    let Some(text) = value.as_str() else {
+        return Ok(());
+    };
+    if !crate::filters::is_timestamp_value(text) {
+        return Ok(());
+    }
+    if fieldtype(field) == "Date" && is_date_only(text) {
+        return Ok(());
+    }
+    Err(ResidualReason::TimestampNotPushed)
+}
+
+/// The legacy equality-map spelling of a declared column predicate.
+pub(super) fn declared_equality(
+    field: &FieldMeta,
+    value: &Value,
+) -> std::result::Result<Value, ResidualReason> {
+    if is_empty_string(value) {
+        return Err(ResidualReason::EmptyStringNotPushed);
+    }
+    // The map compares values structurally, so a date/time string matches the
+    // column's literal text; only the operator path has the precision-aware
+    // timestamp comparison.
+    coerce_column_value(field, value).ok_or(ResidualReason::ValueNotCoercible)
 }

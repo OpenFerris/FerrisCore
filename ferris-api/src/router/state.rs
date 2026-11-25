@@ -84,7 +84,6 @@ impl ApiState {
     #[must_use]
     pub fn with_auth_config(mut self, auth: &ferris_core::AuthConfig) -> Self {
         self.mfa = MfaManager::new(MfaConfig {
-            enabled: auth.mfa_enabled,
             issuer: auth.mfa_issuer.clone(),
             ..MfaConfig::default()
         });

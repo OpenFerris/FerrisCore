@@ -24,10 +24,11 @@ pub fn document_table(doctype: &str) -> Result<String> {
 
 /// The columns every `tab<DocType>` table has.
 ///
-/// `data` holds the document as JSON: the engine reads and writes fields through
-/// it, so a per-field column would be a second source of truth that nothing
-/// keeps in step. `owner`, `docstatus`, `creation` and `modified` are duplicated
-/// out of `data` because they are the columns lists sort and filter on.
+/// Columns are the **only** source of truth for a document (ADR 0001): there is
+/// no `data` blob. Every declared field owns a real column too (see
+/// [`crate::doctype_columns`]); `owner`, `docstatus`, `creation`, `modified`,
+/// `modified_by`, `amended_from` and `workflow_state` are the engine-stamped
+/// system columns a read reconstructs the document from.
 pub fn document_columns() -> Vec<Column> {
     vec![
         Column::new("name", "VARCHAR(255)").not_null().primary_key(),
@@ -35,7 +36,9 @@ pub fn document_columns() -> Vec<Column> {
         Column::new("docstatus", "SMALLINT").not_null().default("0"),
         Column::new("creation", "BIGINT").not_null(),
         Column::new("modified", "BIGINT").not_null(),
-        Column::new("data", "TEXT").not_null(),
+        Column::new("modified_by", "VARCHAR(255)"),
+        Column::new("amended_from", "VARCHAR(255)"),
+        Column::new("workflow_state", "VARCHAR(255)"),
     ]
 }
 
@@ -89,6 +92,9 @@ pub fn document_indexes() -> Vec<(&'static str, &'static [&'static str], bool)> 
     vec![
         ("idx_owner", &["owner"], false),
         ("idx_modified", &["modified"], false),
+        // Owner-scoped lists are the common Desk query; the composite lets the
+        // planner use one index for the filter and the `modified DESC` order.
+        ("idx_owner_modified", &["owner", "modified"], false),
         ("idx_docstatus", &["docstatus"], false),
     ]
 }
@@ -96,16 +102,12 @@ pub fn document_indexes() -> Vec<(&'static str, &'static [&'static str], bool)> 
 /// Whether `field` is backed by a real column of a `tab<DocType>` table *and*
 /// holds one document field, so a declared index may name it as a column.
 ///
-/// Derived from [`document_columns`] so an extra column added there is
-/// automatically indexable here. `data` is deliberately the one exception: it
-/// *is* a column, but it holds the whole document rather than a single field,
-/// so a `meta.indexes` entry naming it is meaningless.
+/// Derived from [`document_columns`] so the system half has one definition.
 pub fn is_indexable_column(field: &str) -> bool {
-    field != "data" && document_columns().iter().any(|c| c.name == field)
+    document_columns().iter().any(|c| c.name == field)
 }
 
-/// How a [`crate::registry::IndexMeta`] entry materializes against the
-/// blob-backed table.
+/// How a [`crate::registry::IndexMeta`] entry materializes.
 ///
 /// `meta.indexes` is the DocType's own declaration, and until now neither the
 /// lazy engine nor the migration runner used it for DDL: lazily-created tables
@@ -113,17 +115,17 @@ pub fn is_indexable_column(field: &str) -> bool {
 /// without plugins. The two DDL paths now share this classification so a
 /// table created by the engine and one created by a migration stay the same
 /// table (the invariant [`document_columns`] already protects).
+///
+/// Document fields live in columns and child tables now (ADR 0001), so there is
+/// no JSON expression target left: a declaration either names real columns or
+/// is skipped. [`DeclaredIndex::JsonField`] is kept for source compatibility
+/// with the runners' match arms and is never returned.
 pub enum DeclaredIndex<'a> {
     /// Every named field is a column: a plain [`ferris_db::sql::ensure_index`].
     Columns,
-    /// One field with no column: the value lives in `data`, and the index must
-    /// be a JSON expression index over it
-    /// ([`ferris_db::sql::ensure_json_index`]).
+    /// No longer produced: there is no `data` blob to index.
     JsonField(&'a str),
-    /// A composite that names a field without a column. There is no portable
-    /// spelling (MySQL would need one generated column per field), so it is
-    /// skipped — the same as today's status quo, where `meta.indexes` was
-    /// ignored altogether.
+    /// A declaration that names a field without a column (or an empty list).
     Unsupported,
 }
 
@@ -135,8 +137,5 @@ pub fn classify_index(index: &crate::registry::IndexMeta) -> DeclaredIndex<'_> {
     if index.fields.iter().all(|f| is_indexable_column(f)) {
         return DeclaredIndex::Columns;
     }
-    match index.fields.as_slice() {
-        [only] => DeclaredIndex::JsonField(only),
-        _ => DeclaredIndex::Unsupported,
-    }
+    DeclaredIndex::Unsupported
 }

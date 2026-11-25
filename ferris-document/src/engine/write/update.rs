@@ -29,8 +29,19 @@ impl DocumentEngine {
             let document = provider.update(ctx, name, data)?;
             return finish_virtual_write(ctx, document);
         }
-        let table = self.ensure_table(&ctx.doctype).await?;
+        let table = self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
         self.ensure_runtime_tables().await?;
+        // Use the effective declaration for the pre-transaction checks too, so a
+        // custom `Link` field is seen by the `User Permission` narrowing.
+        let shape = DocShape::resolve(&self.db, &ctx.doctype, self.db.dialect(), ctx.meta).await?;
+        let effective;
+        let ctx = match shape.meta.as_ref() {
+            Some(meta) => {
+                effective = effective_context(ctx, meta);
+                &effective
+            }
+            None => ctx,
+        };
         // Authorize against stored state *before* the transaction opens, after
         // rejecting the same system-field overrides `update_via` rejects, so the
         // established 400-before-403 order is preserved. The decision needs the
@@ -38,7 +49,9 @@ impl DocumentEngine {
         // connection while `authorize` consults `tab_share` on another one (a
         // one-connection pool would exhaust). `update_via` re-checks inside the
         // transaction, where its read is authoritative.
-        let (existing, owner) = self.read_row(&ctx.doctype, name).await?;
+        let (existing, owner) =
+            read_row_with_shape_via(&mut WriteSink::Db(&self.db), &shape, &ctx.doctype, name)
+                .await?;
         let stored = to_fields(&existing)?;
         let Some(incoming) = data.as_object() else {
             return Err(Error::Validation(ValidationError::Invalid(
@@ -65,6 +78,10 @@ impl DocumentEngine {
             Permission::Write,
         )
         .await?;
+        // The role/share decision admits the action; `User Permission` narrows
+        // *which rows* it reaches. Checking the stored row here closes the gap
+        // where only the incoming `Link` fields were inspected.
+        enforce_user_permission(ctx, &existing, Permission::Write)?;
         // The row write and its version row commit together (DOC-04/SEC-06):
         // the pool used to autocommit the document and then try the version, so
         // a version failure reported an error for a document that was already
@@ -79,10 +96,13 @@ impl DocumentEngine {
                 ctx,
                 name,
                 data,
-                Some(PreAuthorized {
-                    owner: owner.clone(),
-                }),
-                false,
+                UpdateMode {
+                    pre_authorized: Some(PreAuthorized {
+                        owner: owner.clone(),
+                    }),
+                    run_after: false,
+                    shape: &shape,
+                },
             )
             .await
         };
@@ -119,8 +139,23 @@ impl DocumentEngine {
         name: &str,
         data: Value,
     ) -> Result<Value> {
-        self.update_via_with(sink, table, ctx, name, data, None, true)
-            .await
+        // A batch (`apply`) resolves the shape here, before it reads or writes
+        // the row; the metadata cache makes it the same value `ensure_table`
+        // just used.
+        let shape = DocShape::resolve(&self.db, &ctx.doctype, sink.dialect(), ctx.meta).await?;
+        self.update_via_with(
+            sink,
+            table,
+            ctx,
+            name,
+            data,
+            UpdateMode {
+                pre_authorized: None,
+                run_after: true,
+                shape: &shape,
+            },
+        )
+        .await
     }
 
     /// [`Self::update_via`] with an authorization decision already made.
@@ -140,14 +175,34 @@ impl DocumentEngine {
         ctx: &EngineContext<'_>,
         name: &str,
         data: Value,
-        pre_authorized: Option<PreAuthorized>,
-        run_after: bool,
+        mode: UpdateMode<'_>,
     ) -> Result<Value> {
-        let (existing, stored_owner) = read_row_via(sink, &ctx.doctype, name).await?;
+        let UpdateMode {
+            pre_authorized,
+            run_after,
+            shape,
+        } = mode;
+        // The helpers below read `ctx.meta`; use the effective declaration so a
+        // custom field is a declared field for validation and write filtering.
+        let effective;
+        let ctx = match shape.meta.as_ref() {
+            Some(meta) => {
+                effective = effective_context(ctx, meta);
+                &effective
+            }
+            None => ctx,
+        };
+        let (existing, stored_owner) =
+            read_row_with_shape_via(sink, shape, &ctx.doctype, name).await?;
+
+        // Authoritative check on the row the transaction will write: a row
+        // changed between the pre-check and the transaction must not slip past
+        // the operator's `User Permission` rule.
+        enforce_user_permission(ctx, &existing, Permission::Write)?;
 
         // Creation time is engine-stamped and only ever written here, so the
-        // blob is as authoritative as the column. `owner` deliberately comes
-        // from the column (already returned above) rather than the blob.
+        // reconstructed document is as authoritative as the column. `owner`
+        // deliberately comes from the column (already returned above).
         let stored = to_fields(&existing)?;
         let stored_creation = field_str(&stored, "creation");
 
@@ -185,7 +240,7 @@ impl DocumentEngine {
         // `resolve_workflow_update` already refused anything undeclared.
         incoming_fields.remove("workflow_state");
         // Mass assignment (DOC-08): a key the metadata does not declare is not
-        // a document field, so it is refused rather than merged into the blob.
+        // a document field, so it is refused rather than merged into the map.
         reject_undeclared_fields(ctx, &incoming_fields)?;
 
         // Field-level write permissions, applied before the merge: a field the
@@ -290,7 +345,16 @@ impl DocumentEngine {
         // compares it with what it was handed; if the hook ran before
         // `persist_written` it would read the previous state and the save would
         // be rejected ("stored data differs from the data I was given").
-        persist_written(sink, table, name, &document).await?;
+        persist_written(
+            sink,
+            table,
+            &ctx.doctype,
+            name,
+            &document,
+            shape,
+            search::ready_for(&self.db, &ctx.doctype),
+        )
+        .await?;
         // Record history on the same connection, before the after-hooks run so a
         // hook that reads back the version sees the write that just happened.
         self.record_version(
@@ -361,10 +425,24 @@ struct PreAuthorized {
     owner: Option<String>,
 }
 
+/// How an in-transaction update differs from the batch path.
+///
+/// Bundled so the write entry point keeps a readable arity: `update` already
+/// authorized and runs its after-hooks once the row is committed, while `apply`
+/// leaves both to the batch transaction.
+struct UpdateMode<'a> {
+    /// The decision `update` made before opening the transaction.
+    pre_authorized: Option<PreAuthorized>,
+    /// Whether the after-save hooks run before the transaction closes.
+    run_after: bool,
+    /// The physical shape, resolved once and shared with the row read.
+    shape: &'a DocShape,
+}
+
 /// Write the state the workflow validated into the merged document.
 ///
-/// The body never reaches the blob for this key: `update_via_with` removed it
-/// and kept the validated [`WorkflowMove`], so the persisted value is the one
+/// The body never wins for this key: `update_via_with` removed it and kept the
+/// validated [`WorkflowMove`], so the persisted value is the one
 /// `apply`/`apply_to` produced.
 fn apply_workflow_state(
     merged: &mut ferris_core::Map,

@@ -1,6 +1,6 @@
 use super::super::support::*;
 use super::super::*;
-use ferris_core::{DocumentError, Error, Result, SerializationError, ValidationError, Value};
+use ferris_core::{DocumentError, Error, Result, ValidationError, Value};
 use ferris_db::Stmt;
 
 /// The optional metadata table Frappe consults before every other naming rule.
@@ -143,6 +143,24 @@ async fn next_counter(naming: &mut WriteSink<'_>, key: &str) -> Result<u64> {
     })
 }
 
+/// The columns a `Document Naming Rule` row is read from.
+///
+/// Columns are the only source of truth (ADR 0001); the rule stores its
+/// counter, prefix and match condition as columns. A table created before this
+/// layout lacks them, which is a schema mismatch the SELECT reports.
+const RULE_COLUMNS: [&str; 10] = [
+    "document_type",
+    "priority",
+    "prefix",
+    "prefix_digits",
+    "digits",
+    "counter",
+    "apply_if",
+    "fieldname",
+    "condition",
+    "disabled",
+];
+
 /// Apply the highest-priority matching Document Naming Rule, if one exists.
 ///
 /// The rule table is optional metadata: a database that never migrated its
@@ -156,28 +174,50 @@ async fn document_naming_rule(
     if !naming.table_exists(&rule_table()?).await? {
         return Ok(None);
     }
-    let quoted = q(naming.dialect(), &rule_table()?)?;
+    let dialect = naming.dialect();
+    let quoted = q(dialect, &rule_table()?)?;
+    let select = RULE_COLUMNS
+        .iter()
+        .map(|column| q(dialect, column))
+        .collect::<Result<Vec<_>>>()?
+        .join(", ");
+    // Only this DocType's rules can apply: the table holds every DocType's, and
+    // reading them all on each insert was pure waste.
     let rows = naming
         .fetch_all(&Stmt::new(
-            format!("SELECT name, data FROM {quoted}"),
-            Vec::new(),
+            format!(
+                "SELECT {name}, {select} FROM {quoted} WHERE document_type = ? ORDER BY name",
+                name = q(dialect, "name")?
+            ),
+            vec![Value::from(ctx.doctype.as_str())],
         ))
         .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    // One query for every rule's conditions instead of one per rule: the child
+    // table is tiny and its rows are only meaningful for the parents here.
+    let mut conditions = naming_rule_conditions(naming).await?;
 
     let mut rules: Vec<(i64, String, Value)> = Vec::new();
     for row in rows {
         let name = row.str("name")?;
-        let data = row.str("data")?;
-        let value: Value = serde_json::from_str(&data)
-            .map_err(|error| Error::Serialization(SerializationError::Json(error)))?;
-        if truthy(value.get("disabled")) {
+        if row.opt_bool("disabled").unwrap_or(false) {
             continue;
         }
-        if value.get("document_type").and_then(Value::as_str) != Some(ctx.doctype.as_str()) {
-            continue;
+        let priority = row.opt_i64("priority").unwrap_or(0);
+        let mut rule = ferris_core::Map::new();
+        for column in RULE_COLUMNS {
+            if let Some(value) = row.opt_str(column) {
+                rule.insert(column.to_string(), Value::from(value));
+            } else if let Some(value) = row.opt_i64(column) {
+                rule.insert(column.to_string(), Value::from(value));
+            }
         }
-        let priority = integer(value.get("priority")).unwrap_or(0);
-        rules.push((priority, name, value));
+        if let Some(children) = conditions.remove(&name) {
+            rule.insert("conditions".to_string(), Value::Array(children));
+        }
+        rules.push((priority, name, Value::Object(rule)));
     }
     // Higher priority first; the name is the tie-breaker so two rules of the
     // same priority cannot apply in a different order between processes.
@@ -190,6 +230,46 @@ async fn document_naming_rule(
         return mint_from_rule(&rule, &row_name, naming).await.map(Some);
     }
     Ok(None)
+}
+
+/// The stored `Document Naming Rule Condition` rows, grouped by their rule.
+///
+/// One query for the whole child table: the caller then picks the conditions of
+/// the rule it is evaluating. A site without the child table simply has no
+/// conditions.
+async fn naming_rule_conditions(naming: &mut WriteSink<'_>) -> Result<HashMap<String, Vec<Value>>> {
+    let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
+    let table = table_name("Document Naming Rule Condition")?;
+    if !naming.table_exists(&table).await? {
+        return Ok(grouped);
+    }
+    let dialect = naming.dialect();
+    let quoted = q(dialect, &table)?;
+    let rows = naming
+        .fetch_all(&Stmt::new(
+            format!(
+                "SELECT parent, field, condition, value FROM {quoted} \
+                 WHERE parentfield = ? ORDER BY parent, idx"
+            ),
+            vec![Value::from("conditions")],
+        ))
+        .await?;
+    for row in &rows {
+        let Some(parent) = row.opt_str("parent") else {
+            continue;
+        };
+        let mut condition = ferris_core::Map::new();
+        for column in ["field", "condition", "value"] {
+            if let Some(value) = row.opt_str(column) {
+                condition.insert(column.to_string(), Value::from(value));
+            }
+        }
+        grouped
+            .entry(parent)
+            .or_default()
+            .push(Value::Object(condition));
+    }
+    Ok(grouped)
 }
 
 /// Whether a Document Naming Rule applies to this document.
@@ -336,15 +416,12 @@ async fn mint_from_rule(
     let counter = integer(rule.get("counter")).unwrap_or(0).saturating_add(1);
     let name = format!("{prefix}{counter:0digits$}");
 
-    let mut updated = rule.clone();
-    updated.set("counter".to_string(), Value::from(counter));
-    let serialized = canonical_blob(&updated)?;
     let quoted = q(naming.dialect(), &rule_table()?)?;
     naming
         .execute(&Stmt::new(
-            format!("UPDATE {quoted} SET data = ?, modified = ? WHERE name = ?"),
+            format!("UPDATE {quoted} SET counter = ?, modified = ? WHERE name = ?"),
             vec![
-                Value::from(serialized),
+                Value::from(counter),
                 Value::from(chrono::Utc::now().timestamp()),
                 Value::from(row_name),
             ],

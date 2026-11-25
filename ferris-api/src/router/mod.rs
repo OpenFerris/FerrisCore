@@ -1,6 +1,7 @@
 //! REST router: `/api/resource/{doctype}[/{name}]` and `/api/method/{method}`.
 
 mod doctype;
+mod doctype_admin;
 mod error;
 mod locale;
 mod methods;

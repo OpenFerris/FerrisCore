@@ -12,6 +12,12 @@ fn audit_read() -> RolePermission {
 }
 
 /// The audit trail of data exports and file access.
+///
+/// Unlike `User Invitation` (which had no writer until this crate grew one),
+/// this table is **live**: `ferris-files` records `AuditEvent::FileAccess` and
+/// the host's observability sink (`ferris_server::observability::write_audit`)
+/// inserts the row. The declaration stays here — the workspace links it and
+/// the server refuses to duplicate it — and only the host writes it.
 #[must_use]
 pub fn access_log_meta() -> DoctypeMeta {
     DoctypeMeta::new("Access Log", MODULE)

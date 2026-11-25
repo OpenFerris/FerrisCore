@@ -606,7 +606,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_seeded_workspace_round_trips_through_content() {
-        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new("Probe", "Probe"));
+        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new(
+            "WorkspaceItemProbe",
+            "WorkspaceItemProbe",
+        ));
         let db = ferris_db::memory_db().await.unwrap();
 
         let report = seed_specs(&db, &[sample()]).await;
@@ -636,7 +639,10 @@ mod tests {
 
     #[tokio::test]
     async fn load_workspaces_keeps_the_declaration_order() {
-        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new("Probe", "Probe"));
+        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new(
+            "WorkspaceItemProbe",
+            "WorkspaceItemProbe",
+        ));
         let db = ferris_db::memory_db().await.unwrap();
 
         // Deliberately out of alphabetical order: the seed stamps `sequence_id`
@@ -658,7 +664,10 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_is_idempotent() {
-        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new("Probe", "Probe"));
+        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new(
+            "WorkspaceItemProbe",
+            "WorkspaceItemProbe",
+        ));
         let db = ferris_db::memory_db().await.unwrap();
 
         let first = seed_specs(&db, &[sample()]).await;
@@ -678,7 +687,10 @@ mod tests {
     /// edit. The fingerprint of the last seed is what distinguishes them.
     #[tokio::test]
     async fn a_boot_does_not_revert_an_operator_edit() {
-        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new("Probe", "Probe"));
+        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new(
+            "WorkspaceItemProbe",
+            "WorkspaceItemProbe",
+        ));
         let db = ferris_db::memory_db().await.unwrap();
         let first = seed_specs(&db, &[sample()]).await;
         assert!(first.warnings.is_empty(), "{first:?}");
@@ -708,7 +720,10 @@ mod tests {
     /// LOGIC-03: more rows than the engine's default page must all load.
     #[tokio::test]
     async fn load_workspaces_reads_every_row_not_only_the_first_page() {
-        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new("Probe", "Probe"));
+        ferris_schema::register_doctype(ferris_schema::DoctypeMeta::new(
+            "WorkspaceItemProbe",
+            "WorkspaceItemProbe",
+        ));
         let db = ferris_db::memory_db().await.unwrap();
         let specs: Vec<WorkspaceSpec> = (0..25)
             .map(|index| {

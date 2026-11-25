@@ -2,7 +2,8 @@ use super::types::*;
 use crate::filters::ListFilter;
 use ferris_core::{Result, Value};
 use ferris_db::Dialect;
-use ferris_db::sql::{Ident, json_field_target};
+use ferris_db::sql::Ident;
+use ferris_schema::FieldMeta;
 use ferris_schema::contract::list::FilterOp;
 
 /// How many OR groups `ops` splits into.
@@ -31,68 +32,7 @@ pub(crate) fn pushdown_reason(field: &str) -> Option<ResidualReason> {
 /// a different thing from the field not being pushable and is reported as such.
 pub(crate) fn sql_predicate(
     f: &ListFilter,
-    json_indexed_fields: &[String],
 ) -> std::result::Result<Option<Predicate>, ResidualReason> {
-    let is_json_indexed = json_indexed_fields.iter().any(|x| x == &f.field);
-    if is_json_indexed {
-        // The Rust `single_matches` uses the same string coercion for the
-        // needle/cell; for an exact match on a string field that lives in JSON
-        // the unquoted text equality matches it. Ranges are deliberately left
-        // in Rust because `filters::cmp` is numeric-when-both-parse and
-        // case-insensitive, a set of rules SQL text comparison does not satisfy.
-        let value = match &f.value {
-            Value::String(s) => Value::string(s.clone()),
-            other => Value::string(other.to_json().to_string()),
-        };
-        match f.op {
-            FilterOp::Equals => {
-                // `""` is exactly what `cell_str` also yields for a missing
-                // cell, so the Rust `eq ""` matches rows where the field is
-                // absent or empty while `json_extract(...) = ''` never matches
-                // a SQL NULL. Pushing it would drop the rows the Rust filter
-                // keeps.
-                //
-                // A timestamp is the same kind of trap: the Rust evaluator now
-                // compares it at the precision the filter names (`equals 12:34`
-                // matches `12:34:56`), while the exact-text index only matches
-                // the literal `12:34`. Keep it in Rust so both paths agree.
-                if value
-                    .as_str()
-                    .is_some_and(|s| s.is_empty() || crate::filters::is_timestamp_value(s))
-                {
-                    return Err(ResidualReason::JsonExactNotPushed);
-                }
-                return Ok(Some(Predicate::JsonEq {
-                    field: f.field.clone(),
-                    value,
-                }));
-            }
-            FilterOp::In => {
-                let values: Vec<String> = f
-                    .value
-                    .as_str()
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
-                // An empty part compares equal to a missing cell in Rust
-                // (`cell_str` reads it as `""`), so `in a,` matches rows
-                // without the field. SQL `IN` cannot express that, so any empty
-                // part keeps the whole filter in Rust.
-                if values.iter().any(String::is_empty) {
-                    return Err(ResidualReason::JsonExactNotPushed);
-                }
-                return Ok(Some(Predicate::JsonIn {
-                    field: f.field.clone(),
-                    values,
-                }));
-            }
-            FilterOp::Like => return Err(ResidualReason::JsonLikeNotPushed),
-            FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte => {
-                return Err(ResidualReason::JsonRangeNotPushed);
-            }
-        }
-    }
     if let Some(reason) = pushdown_reason(&f.field) {
         return Err(reason);
     }
@@ -125,6 +65,7 @@ pub(crate) fn sql_predicate(
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
+                .map(Value::string)
                 .collect(),
         },
         FilterOp::Gt => Predicate::Gt {
@@ -143,6 +84,88 @@ pub(crate) fn sql_predicate(
             column: f.field.clone(),
             value,
         },
+    };
+    Ok(Some(predicate))
+}
+
+/// A `ListFilter` over a declared field's real column, as a SQL predicate.
+///
+/// `Ok(None)` means the operator has no faithful spelling for this column
+/// (for example a range over `Check`); `Err` means the *value* cannot be
+/// bound. Both keep the filter in Rust.
+pub(crate) fn declared_filter_predicate(
+    field: &FieldMeta,
+    filter: &ListFilter,
+) -> std::result::Result<Option<Predicate>, ResidualReason> {
+    let column = field.fieldname.clone();
+    let predicate = match filter.op {
+        FilterOp::Equals => {
+            // `""` also matches a missing cell in Rust (`cell_str`), which is
+            // a column `NULL`, not `''`.
+            if is_empty_string(&filter.value) {
+                return Err(ResidualReason::EmptyStringNotPushed);
+            }
+            timestamp_guard(field, &filter.value)?;
+            let value = coerce_column_value(field, &filter.value)
+                .ok_or(ResidualReason::ValueNotCoercible)?;
+            Predicate::Eq { column, value }
+        }
+        FilterOp::In => {
+            let parts: Vec<&str> = filter
+                .value
+                .as_str()
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .collect();
+            // An empty part matches a missing cell in Rust, which no SQL `IN`
+            // can express.
+            if parts.iter().any(|part| part.is_empty()) {
+                return Err(ResidualReason::EmptyStringNotPushed);
+            }
+            let mut values = Vec::with_capacity(parts.len());
+            for part in parts {
+                values.push(
+                    coerce_column_value(field, &Value::string(part))
+                        .ok_or(ResidualReason::ValueNotCoercible)?,
+                );
+            }
+            Predicate::In { column, values }
+        }
+        FilterOp::Like => {
+            if !is_text_column(field) {
+                return Ok(None);
+            }
+            let needle = filter.value.as_str().unwrap_or_default();
+            // An empty substring matches every cell in Rust, including a
+            // missing one; `LIKE '%%'` never matches SQL `NULL`.
+            if needle.is_empty() {
+                return Err(ResidualReason::EmptyStringNotPushed);
+            }
+            Predicate::Like {
+                column,
+                needle: format!("%{}%", escape_like(needle)),
+            }
+        }
+        FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte => {
+            // Booleans have no meaningful order in the evaluator: it compares
+            // their `true`/`false` text. Keep that in Rust.
+            if !is_text_column(field) && !is_numeric_column(field) {
+                return Ok(None);
+            }
+            if is_text_column(field) {
+                timestamp_guard(field, &filter.value)?;
+            }
+            let value = coerce_column_value(field, &filter.value)
+                .ok_or(ResidualReason::ValueNotCoercible)?;
+            match filter.op {
+                FilterOp::Gt => Predicate::Gt { column, value },
+                FilterOp::Gte => Predicate::Gte { column, value },
+                FilterOp::Lt => Predicate::Lt { column, value },
+                FilterOp::Lte => Predicate::Lte { column, value },
+                _ => unreachable!("matched above"),
+            }
+        }
     };
     Ok(Some(predicate))
 }
@@ -170,20 +193,6 @@ pub(crate) fn render_predicate(
             params.push(value.clone());
             Ok(format!("{column} = ?"))
         }
-        Predicate::JsonEq { field, value } => {
-            let target = json_field_target(dialect, field)?;
-            params.push(value.clone());
-            Ok(format!("{target} = ?"))
-        }
-        Predicate::JsonIn { field, values } => {
-            if values.is_empty() {
-                return Ok("1 = 0".to_string());
-            }
-            let target = json_field_target(dialect, field)?;
-            params.extend(values.iter().map(|v| Value::string(v.clone())));
-            let holes = vec!["?"; values.len()].join(", ");
-            Ok(format!("{target} IN ({holes})"))
-        }
         Predicate::Like { column, needle } => {
             let column = Ident::new(column)?.quote(dialect);
             params.push(Value::string(needle.clone()));
@@ -198,7 +207,7 @@ pub(crate) fn render_predicate(
                 return Ok("1 = 0".to_string());
             }
             let column = Ident::new(column)?.quote(dialect);
-            params.extend(values.iter().map(|v| Value::string(v.clone())));
+            params.extend(values.iter().cloned());
             let holes = vec!["?"; values.len()].join(", ");
             Ok(format!("{column} IN ({holes})"))
         }

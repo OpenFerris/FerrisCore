@@ -1,25 +1,18 @@
 //! Multi-factor authentication (MFA)
 
-/// The largest TOTP digit count the truncation maths supports: `10^digits` must
-/// fit in a `u32`, and the extracted 31-bit integer is at most `2^31 - 1`
-/// (AUTH11).
-pub const MAX_TOTP_DIGITS: usize = 9;
+/// The largest TOTP digit count `totp-rs` accepts. The old custom truncation
+/// maths supported nine; six is what the framework generates and eight is the
+/// library ceiling.
+pub const MAX_TOTP_DIGITS: usize = 8;
 
 use data_encoding::BASE32_NOPAD;
 use ferris_core::{AuthError, Error, Result};
-use hmac::{Hmac, Mac};
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
-use sha1::Sha1;
-use sha2::{Sha256, Sha512};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::crypto::constant_time_eq;
 
 /// MFA configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MfaConfig {
-    pub enabled: bool,
     pub issuer: String,
     pub totp_digits: usize,
     pub totp_period: u64,
@@ -30,7 +23,6 @@ pub struct MfaConfig {
 impl Default for MfaConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             issuer: "Ferris".to_string(),
             totp_digits: 6,
             totp_period: 30,
@@ -41,12 +33,26 @@ impl Default for MfaConfig {
 }
 
 /// TOTP configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TotpConfig {
     pub secret: String,
     pub digits: usize,
     pub period: u64,
     pub algorithm: TotpAlgorithm,
+}
+
+/// `Debug` is redacted: the secret is the second factor, so a config logged by
+/// a caller (or a `{:?}` in a test failure) must not print it. The parameters
+/// stay, because they are what a diagnostic actually needs.
+impl std::fmt::Debug for TotpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TotpConfig")
+            .field("secret", &"<redacted>")
+            .field("digits", &self.digits)
+            .field("period", &self.period)
+            .field("algorithm", &self.algorithm)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,16 +81,12 @@ pub struct MfaManager {
 }
 
 impl MfaManager {
-    /// Build a manager, clamping the TOTP digit count into the range the
-    /// truncation maths supports.
-    ///
-    /// `hotp` computes `binary % 10^digits`: at 10 digits that exponent
-    /// overflows `u32` (panic in debug, wrap in release — AUTH11), so the
-    /// configured value is clamped to `1..=9` once, here, instead of relying on
-    /// every caller to pass a sane config.
+    /// Build a manager, clamping the digit count into the range `totp-rs`
+    /// accepts (6–8). The default is 6, which is what the enrolment endpoint
+    /// generates.
     #[must_use]
     pub fn new(mut config: MfaConfig) -> Self {
-        config.totp_digits = config.totp_digits.clamp(1, MAX_TOTP_DIGITS);
+        config.totp_digits = config.totp_digits.clamp(6, MAX_TOTP_DIGITS);
         Self { config }
     }
 
@@ -104,7 +106,7 @@ impl MfaManager {
     ///
     /// Base32 is what the `secret=` parameter of an `otpauth://` URI requires
     /// and what authenticator apps decode; the same string is fed back into
-    /// [`Self::hotp`]. Encoding it as Base64 here (as this used to) made the
+    /// the TOTP generator. Encoding it as Base64 here (as this used to) made the
     /// server derive a different key than every standard app, so no generated
     /// code ever verified.
     ///
@@ -150,11 +152,16 @@ impl MfaManager {
     /// # Errors
     ///
     /// [`AuthError::TokenInvalid`] when the stored secret is not valid Base32
-    /// ([`Self::hotp`] fails closed) or the system clock is before the Unix
+    /// (the TOTP generator fails closed) or the system clock is before the Unix
     /// epoch.
     pub fn generate_totp(&self, config: &TotpConfig) -> Result<String> {
-        let counter = self.get_time_counter(config.period)?;
-        self.hotp(&config.secret, counter, config.digits, config.algorithm)
+        crate::totp::generate(
+            &config.secret,
+            u8::try_from(config.digits).unwrap_or(8),
+            config.period,
+            algorithm(config.algorithm),
+        )
+        .map_err(|error| Error::Auth(AuthError::TokenInvalid(error)))
     }
 
     /// Verify a TOTP code within `window` time steps either side of now.
@@ -168,26 +175,26 @@ impl MfaManager {
     /// [`AuthError::TokenInvalid`] for an undecodable secret, or when the
     /// system clock is before the Unix epoch.
     pub fn verify_totp(&self, config: &TotpConfig, code: &str, window: i64) -> Result<bool> {
-        let counter = self.get_time_counter(config.period)?;
-
-        for i in -window..=window {
-            let Some(test_counter) = counter.checked_add_signed(i) else {
-                continue;
-            };
-            let expected = self.hotp(
-                &config.secret,
-                test_counter,
-                config.digits,
-                config.algorithm,
-            )?;
-            if constant_time_eq(expected.as_bytes(), code.as_bytes()) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let skew = u16::try_from(window.max(0)).unwrap_or(u16::MAX);
+        crate::totp::verify(
+            &config.secret,
+            code,
+            u8::try_from(config.digits).unwrap_or(8),
+            config.period,
+            skew,
+            algorithm(config.algorithm),
+        )
+        .map(|matched| matched.is_some())
+        .map_err(|error| Error::Auth(AuthError::TokenInvalid(error)))
     }
 
     /// Generate backup codes
+    ///
+    /// Each character is one of `0-9A-Z`: [`char::from_digit`] covers the whole
+    /// `0..36` radix, so the conversion cannot fail and there is no `unwrap()`
+    /// in the generation path. Letters are upper-cased to match what the
+    /// authenticator UI shows.
+    #[must_use]
     pub fn generate_backup_codes(&self) -> Vec<String> {
         let mut rng = thread_rng();
         let mut codes = Vec::new();
@@ -195,12 +202,10 @@ impl MfaManager {
         for _ in 0..self.config.backup_codes_count {
             let code: String = (0..self.config.backup_code_length)
                 .map(|_| {
-                    let c = rng.gen_range(0..36);
-                    if c < 10 {
-                        char::from_digit(c, 10).unwrap()
-                    } else {
-                        char::from_u32('A' as u32 + c - 10).unwrap()
-                    }
+                    let digit = rng.gen_range(0..36_u32);
+                    char::from_digit(digit, 36)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase()
                 })
                 .collect();
             codes.push(code);
@@ -208,90 +213,13 @@ impl MfaManager {
 
         codes
     }
+}
 
-    /// Seconds since the Unix epoch divided by `period`.
-    ///
-    /// # Errors
-    ///
-    /// [`AuthError::TokenInvalid`] if the system clock is before the epoch —
-    /// a fallible result instead of the `unwrap` that used to panic there
-    /// (AUTH11).
-    fn get_time_counter(&self, period: u64) -> Result<u64> {
-        let period = period.max(1);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| {
-                Error::Auth(AuthError::TokenInvalid(format!(
-                    "system clock is before the Unix epoch: {e}"
-                )))
-            })?
-            .as_secs();
-        Ok(now / period)
-    }
-
-    /// RFC 6238 HOTP with dynamic truncation.
-    ///
-    /// # Errors
-    ///
-    /// [`AuthError::TokenInvalid`] when `secret` is not valid Base32. This used
-    /// to `unwrap_or_default()`, which turned a corrupted secret into the
-    /// **empty key** and happily generated and verified codes from it (AUTH9);
-    /// failing closed is the only safe behaviour for a credential.
-    fn hotp(
-        &self,
-        secret: &str,
-        counter: u64,
-        digits: usize,
-        algorithm: TotpAlgorithm,
-    ) -> Result<String> {
-        let secret_bytes = BASE32_NOPAD.decode(secret.as_bytes()).map_err(|e| {
-            Error::Auth(AuthError::TokenInvalid(format!(
-                "TOTP secret is not valid Base32: {e}"
-            )))
-        })?;
-        // An *empty* decoded secret is the same hazard as an undecodable one:
-        // it is a well-defined, attacker-computable key. Base32 decodes `""` to
-        // zero bytes without error, so this has to be rejected explicitly
-        // (AUTH9).
-        if secret_bytes.is_empty() {
-            return Err(Error::Auth(AuthError::TokenInvalid(
-                "TOTP secret is empty".to_string(),
-            )));
-        }
-        let counter_bytes = counter.to_be_bytes();
-
-        let result = match algorithm {
-            TotpAlgorithm::Sha1 => {
-                let mut mac = Hmac::<Sha1>::new_from_slice(&secret_bytes)
-                    .expect("HMAC accepts keys of any size");
-                mac.update(&counter_bytes);
-                mac.finalize().into_bytes().to_vec()
-            }
-            TotpAlgorithm::Sha256 => {
-                let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes)
-                    .expect("HMAC accepts keys of any size");
-                mac.update(&counter_bytes);
-                mac.finalize().into_bytes().to_vec()
-            }
-            TotpAlgorithm::Sha512 => {
-                let mut mac = Hmac::<Sha512>::new_from_slice(&secret_bytes)
-                    .expect("HMAC accepts keys of any size");
-                mac.update(&counter_bytes);
-                mac.finalize().into_bytes().to_vec()
-            }
-        };
-
-        // Dynamic truncation (last byte low nibble selects the offset).
-        let offset = (result[result.len() - 1] & 0x0F) as usize;
-        let binary = ((result[offset] & 0x7F) as u32) << 24
-            | (result[offset + 1] as u32) << 16
-            | (result[offset + 2] as u32) << 8
-            | (result[offset + 3] as u32);
-
-        // `digits` is clamped to `1..=MAX_TOTP_DIGITS` in `new`, so the exponent
-        // cannot overflow (AUTH11).
-        let otp = binary % 10_u32.pow(digits.min(MAX_TOTP_DIGITS) as u32);
-        Ok(format!("{:0width$}", otp, width = digits))
+fn algorithm(algorithm: TotpAlgorithm) -> totp_rs::Algorithm {
+    match algorithm {
+        TotpAlgorithm::Sha1 => totp_rs::Algorithm::SHA1,
+        TotpAlgorithm::Sha256 => totp_rs::Algorithm::SHA256,
+        TotpAlgorithm::Sha512 => totp_rs::Algorithm::SHA512,
     }
 }
 
@@ -339,6 +267,18 @@ mod tests {
         }
     }
 
+    /// The seed is the second factor: printing a `TotpConfig` must not publish
+    /// it, but the parameters a diagnostic needs stay visible.
+    #[test]
+    fn totp_config_debug_redacts_the_secret() {
+        let config = MfaManager::default().generate_totp_secret();
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains(&config.secret), "{debug}");
+        assert!(debug.contains("<redacted>"), "{debug}");
+        assert!(debug.contains("digits"), "{debug}");
+    }
+
     #[test]
     fn test_totp_uri() {
         let manager = MfaManager::new(MfaConfig {
@@ -374,16 +314,15 @@ mod tests {
     /// standard Base32 secret, so a real authenticator agrees with the server.
     #[test]
     fn totp_matches_the_rfc6238_sha1_vector() {
-        let manager = MfaManager::default();
         // secret "12345678901234567890" (ASCII) = Base32, T0 = 59 s -> counter 1.
-        let code = manager
-            .hotp(
-                "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
-                1,
-                8,
-                TotpAlgorithm::Sha1,
-            )
-            .expect("valid Base32 secret");
+        let code = crate::totp::generate_at(
+            "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            8,
+            30,
+            algorithm(TotpAlgorithm::Sha1),
+            59,
+        )
+        .expect("valid Base32 secret");
         assert_eq!(code, "94287082");
     }
 
@@ -412,7 +351,7 @@ mod tests {
         assert!(manager.verify_totp(&empty, "000000", 1).is_err());
     }
 
-    /// AUTH11: an oversized `totp_digits` is clamped at construction, so `hotp`
+    /// AUTH11: an oversized `totp_digits` is clamped at construction, so the generator
     /// cannot overflow `10^digits`.
     #[test]
     fn a_huge_digit_count_is_clamped_not_overflowed() {

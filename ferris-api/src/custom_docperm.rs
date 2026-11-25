@@ -4,4 +4,6 @@
 //! the WASM host enforce the same rows; this module only re-exports it so every
 //! existing `crate::custom_docperm::…` path keeps resolving.
 
-pub(crate) use ferris_schema::custom_docperm::{all, effective_permissions, rule_from_value};
+pub(crate) use ferris_schema::custom_docperm::{
+    all, effective_permissions, for_doctype, rule_from_row,
+};

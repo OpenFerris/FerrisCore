@@ -1,15 +1,17 @@
 //! The single authority on how SQL is spelled per backend.
 //!
 //! Every portability decision in the framework funnels through [`Dialect`].
-//! `sqlx`'s `Any` driver hides the concrete backend and rewrites `?`
-//! placeholders per driver, but it does *not* rewrite dialect syntax: an
-//! `ON CONFLICT` upsert, a double-quoted identifier or `CREATE INDEX IF NOT
-//! EXISTS` is Postgres/SQLite-only SQL that MySQL rejects outright.
+//! The pool is concrete per backend; the framework writes the portable `?`
+//! form and [`Dialect::render_placeholders`] turns it into `$1`, `$2`, … for
+//! Postgres. Dialect *syntax* is not rewritten: an `ON CONFLICT` upsert, a
+//! double-quoted identifier or `CREATE INDEX IF NOT EXISTS` is
+//! Postgres/SQLite-only SQL that MySQL rejects outright.
 //!
 //! The dialect travels with the connection ([`crate::Db`]) so no call site has
 //! to remember which backend it is talking to.
 
 use ferris_core::{DatabaseType, Error, Result, ValidationError, config::SslMode};
+use std::borrow::Cow;
 
 /// Concrete SQL backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -129,24 +131,6 @@ impl Dialect {
         })
     }
 
-    /// Escape a string so it can be embedded as a `'...'` SQL literal.
-    ///
-    /// Backslashes are doubled on MySQL because it treats `\` as an escape
-    /// character inside string literals by default; Postgres uses the standard
-    /// `''` doubling (and only interprets backslashes when
-    /// `standard_conforming_strings` is off, which is not the default).
-    pub fn escape_string_literal(&self, value: &str) -> String {
-        let mut out = String::with_capacity(value.len() + 2);
-        for c in value.chars() {
-            match c {
-                '\'' => out.push_str("''"),
-                '\\' if matches!(self, Self::MySQL | Self::SQLite) => out.push_str("\\\\"),
-                _ => out.push(c),
-            }
-        }
-        out
-    }
-
     /// Query-string fragment applying an [`SslMode`] for this dialect.
     pub fn ssl_param(&self, mode: SslMode) -> Option<&'static str> {
         let value = match self {
@@ -179,6 +163,128 @@ impl Dialect {
             "sslmode"
         }
     }
+
+    /// Rewrite `?` bind placeholders to the backend's spelling.
+    ///
+    /// SQLite and MySQL take `?`; Postgres takes `$1`, `$2`, … The rest of the
+    /// framework writes the portable `?` form, so this is the single place a
+    /// statement is adapted before it reaches a Postgres connection.
+    ///
+    /// The scan only rewrites a `?` outside string literals, quoted
+    /// identifiers, comments and dollar-quoted bodies. A statement with no
+    /// bound parameters is returned untouched: a `?` there is a literal, not a
+    /// hole. The JSONB `?` operator is not used by this codebase; use
+    /// [`crate::sql::ddl::json_field_target`] for JSON access instead.
+    #[must_use]
+    pub fn render_placeholders(self, sql: &str) -> Cow<'_, str> {
+        if self != Self::Postgres {
+            return Cow::Borrowed(sql);
+        }
+        let bytes = sql.as_bytes();
+        let mut out: Option<String> = None;
+        let mut last = 0;
+        let mut n = 0usize;
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i, bytes[i]),
+                b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                    i = skip_line_comment(bytes, i);
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    i = skip_block_comment(bytes, i);
+                }
+                b'$' => {
+                    i = match dollar_quote_end(bytes, i) {
+                        Some(close) => skip_dollar_quote(bytes, i, close),
+                        None => i + 1,
+                    };
+                }
+                b'?' => {
+                    n += 1;
+                    let buffer = out.get_or_insert_with(|| String::with_capacity(sql.len() + 8));
+                    buffer.push_str(&sql[last..i]);
+                    buffer.push('$');
+                    buffer.push_str(&n.to_string());
+                    last = i + 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+
+        match out {
+            Some(mut buffer) => {
+                buffer.push_str(&sql[last..]);
+                Cow::Owned(buffer)
+            }
+            None => Cow::Borrowed(sql),
+        }
+    }
+}
+
+/// Index just past the closing quote, honouring a doubled quote escape.
+fn skip_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == quote {
+            if bytes.get(i + 1) == Some(&quote) {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            return i + 2;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// If `start` opens a Postgres dollar-quoted body, the index of its closing `$`.
+fn dollar_quote_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'$' => return Some(i),
+            c if c.is_ascii_alphanumeric() || c == b'_' => i += 1,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn skip_dollar_quote(bytes: &[u8], open: usize, close: usize) -> usize {
+    let tag = &bytes[open..=close];
+    let mut i = close + 1;
+    while i + tag.len() <= bytes.len() {
+        if &bytes[i..i + tag.len()] == tag {
+            return i + tag.len();
+        }
+        i += 1;
+    }
+    bytes.len()
 }
 
 /// Whether `s` is a bare SQL identifier: `[A-Za-z0-9_]+`.

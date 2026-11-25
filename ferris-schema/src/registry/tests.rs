@@ -188,9 +188,15 @@ fn test_registry() {
 }
 
 #[test]
-fn json_indexed_fields_collects_single_field_json_indexes() {
+fn json_indexed_fields_is_empty_without_a_data_blob() {
+    // A declared field now owns a real column and is indexed by
+    // `create_doc_type_statements`; there is no JSON expression target left.
     let meta = DoctypeMeta {
         name: "SolmecRead".to_string(),
+        fields: vec![
+            crate::FieldMeta::data("device_id"),
+            crate::FieldMeta::data("status"),
+        ],
         indexes: vec![
             IndexMeta {
                 name: "idx_reads_device".to_string(),
@@ -205,12 +211,6 @@ fn json_indexed_fields_collects_single_field_json_indexes() {
                 index_type: 0,
             },
             IndexMeta {
-                name: "idx_reads_status".to_string(),
-                fields: vec!["status".to_string()],
-                unique: false,
-                index_type: 0,
-            },
-            IndexMeta {
                 name: "idx_owner".to_string(),
                 fields: vec!["owner".to_string()],
                 unique: false,
@@ -219,11 +219,10 @@ fn json_indexed_fields_collects_single_field_json_indexes() {
         ],
         ..Default::default()
     };
-    let fields = meta.json_indexed_fields();
-    // `owner` is a column, so not returned; the mixed composite `idx_reads_device_ts`
-    // is unsupported, so only single blob fields.
-    assert_eq!(fields, vec!["device_id".to_string(), "status".to_string()]);
-    // Duplicates are coalesced: the same field declared twice would appear once.
+    assert!(
+        meta.json_indexed_fields().is_empty(),
+        "no JSON index remains"
+    );
 }
 
 /// Every registered `DocType` carries the `tags` standard field, without

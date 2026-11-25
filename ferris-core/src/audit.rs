@@ -20,6 +20,11 @@ pub enum AuditEvent {
     Login { user: String, ip: String },
     /// A session was closed by the caller (`Activity Log`, operation `logout`).
     Logout { user: String, ip: String },
+    /// A login was refused (`Activity Log`, operation `login_failed`). The
+    /// `user` is the resolved account id, or `unknown` when the submitted
+    /// identity matched no row; the password and any second-factor code are
+    /// never part of the event.
+    LoginFailed { user: String, ip: String },
     /// A stored file was read or exported (`Access Log`).
     FileAccess {
         user: String,

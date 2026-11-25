@@ -58,14 +58,30 @@ fn admin_user() -> ferris_core::User {
 }
 
 async fn stored(db: &Db, name: &str) -> Value {
-    db.fetch_one(&Stmt::new(
-        "SELECT data FROM tabToDo WHERE name = ?",
-        vec![Value::from(name)],
-    ))
-    .await
-    .unwrap()
-    .json("data")
-    .unwrap()
+    // Columns are the only source of truth: read them, not a blob.
+    let row = db
+        .fetch_one(&Stmt::new(
+            "SELECT name, title, status, docstatus FROM tabToDo WHERE name = ?",
+            vec![Value::from(name)],
+        ))
+        .await
+        .unwrap();
+    let mut document = ferris_core::Map::new();
+    if let Some(value) = row.opt_str("name") {
+        document.insert("name".to_string(), Value::from(value));
+    }
+    for field in ["title", "status"] {
+        if let Some(value) = row.opt_str(field) {
+            document.insert(field.to_string(), Value::from(value));
+        }
+    }
+    let status = match row.opt_i64("docstatus").unwrap_or(0) {
+        1 => "submitted",
+        2 => "cancelled",
+        _ => "draft",
+    };
+    document.insert("docstatus".to_string(), Value::from(status));
+    Value::Object(document)
 }
 
 #[test]

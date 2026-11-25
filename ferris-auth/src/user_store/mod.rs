@@ -14,15 +14,19 @@
 //!
 //! Split into fragments: this `mod.rs` owns the row type, the login/identity
 //! surface and the document↔row mapping; [`mfa`] owns the MFA and backup-code
-//! surface; [`tests`] holds the suite.
+//! surface; [`login_support`] owns the credential material the `axum-login`
+//! backend reads; [`tests`] holds the suite.
 
+mod login_support;
 mod mfa;
+
+pub use login_support::LoginRecord;
 
 #[cfg(test)]
 mod tests;
 
 use ferris_core::{DocumentError, Error, Map, Result, SerializationError, ValidationError, Value};
-use ferris_db::Db;
+use ferris_db::{Db, Stmt};
 use ferris_document::{DocumentEngine, ListQuery};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +47,8 @@ pub struct StoredUser {
     pub full_name: String,
     pub user_type: String,
     pub enabled: bool,
+    /// Whether the account's email address has been proven (`email_verified`).
+    pub email_verified: bool,
     pub mfa_enabled: bool,
     pub roles: Vec<String>,
     pub last_login: Option<String>,
@@ -124,6 +130,10 @@ fn document_to_stored(document: &Value) -> Result<StoredUser> {
             .get("enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        email_verified: document
+            .get("email_verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         mfa_enabled: document
             .get("mfa_enabled")
             .and_then(Value::as_bool)
@@ -145,6 +155,24 @@ fn document_to_stored(document: &Value) -> Result<StoredUser> {
             .filter(|value| !value.is_empty())
             .map(str::to_string),
     })
+}
+
+/// The fixed AES-256 key the `Secret`-field tests seal with.
+///
+/// `User.mfa_secret` is a `Secret` field, so a test that writes one needs the
+/// AEAD keyring installed. `install_keyring` treats a re-install of the same
+/// material as a no-op and `OnceLock` cannot be reset, so this one key serves
+/// the whole test binary.
+#[cfg(test)]
+pub(crate) fn install_test_keyring() {
+    const TEST_SECRET_KEY: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let key = ferris_core::secret::SecretKey::parse(TEST_SECRET_KEY)
+        .expect("the test key is 32 bytes of hex");
+    let _ = ferris_core::secret::install_keyring(ferris_core::secret::SecretKeyring::new(
+        key,
+        Vec::new(),
+    ));
 }
 
 /// Engine-backed user repository.
@@ -170,6 +198,12 @@ impl UserStore {
     /// Create the `User` table (no-op when it already exists) and make sure the
     /// `Password` hasher is installed.
     ///
+    /// `refresh_table`, not `ensure_table`: the engine caches the tables it has
+    /// ensured per database, so a table created by an earlier release would keep
+    /// its old shape and never gain a column added to the declaration since
+    /// (`mfa_last_step`). Refreshing drops the cache entry and re-runs the
+    /// idempotent `ALTER TABLE ... ADD COLUMN` path.
+    ///
     /// # Errors
     ///
     /// Database errors from creating the table or its indexes.
@@ -178,7 +212,22 @@ impl UserStore {
         // Register the meta first so `ensure_table` materializes the declared
         // `email`/`username` indexes, exactly as the boot-time registry does.
         ferris_schema::register_doctype(crate::doctypes::user_meta());
-        self.engine.ensure_table(DOCTYPE).await.map(|_| ())
+        self.engine.refresh_table(DOCTYPE).await.map(|_| ())
+    }
+
+    /// The dialect-quoted `tabUser` table name.
+    ///
+    /// The store's hand-written statements (the atomic TOTP step claim and the
+    /// lockout counter) cannot go through the engine, so they derive the table
+    /// the same way the engine does and quote it for the active backend.
+    pub(crate) fn user_table(&self) -> Result<String> {
+        let table = ferris_document::table_name(DOCTYPE)?;
+        Ok(ferris_db::sql::Ident::new(&table)?.quote(self.db.dialect()))
+    }
+
+    /// One dialect-quoted `User` column name.
+    pub(crate) fn user_column(&self, name: &str) -> Result<String> {
+        Ok(ferris_db::sql::Ident::new(name)?.quote(self.db.dialect()))
     }
 
     /// The engine document for a login (email or username), or `None`.
@@ -193,7 +242,10 @@ impl UserStore {
     }
 
     /// The first document whose `field` equals `value`.
-    async fn first_by(&self, field: &str, value: &str) -> Result<Option<Value>> {
+    ///
+    /// `pub(crate)` for the recovery flows, which resolve a single-use token by
+    /// its digest column.
+    pub(crate) async fn first_by(&self, field: &str, value: &str) -> Result<Option<Value>> {
         let meta = crate::doctypes::user_meta();
         let ctx = system_context(&meta);
         let query = ListQuery {
@@ -358,13 +410,19 @@ impl UserStore {
     }
 
     /// Read a user document, or `None` when there is no such user.
-    async fn load(&self, id: &str) -> Result<Option<Value>> {
+    ///
+    /// `pub(crate)` so the recovery flows can inspect and clear the `permlevel`
+    /// 1 token columns, which [`StoredUser`] deliberately does not carry.
+    pub(crate) async fn load(&self, id: &str) -> Result<Option<Value>> {
         self.document_by_id(id).await
     }
 
     /// Merge `fields` into a user document. A no-op for an unknown user, so the
     /// audit writers never fail a request over a deleted account.
-    async fn patch(&self, id: &str, fields: Map) -> Result<()> {
+    ///
+    /// `pub(crate)` for the recovery flows, which write and clear `permlevel` 1
+    /// token columns through the same engine path as every other update.
+    pub(crate) async fn patch(&self, id: &str, fields: Map) -> Result<()> {
         if self.load(id).await?.is_none() {
             return Ok(());
         }
@@ -389,16 +447,93 @@ impl UserStore {
         self.patch(id, fields).await
     }
 
+    /// The OAuth provider's stable subject bound to `id`, if any.
+    ///
+    /// `oauth_subject` is `permlevel` 1, so this goes through the store's
+    /// `System Manager` context; the empty string reads back as `None`.
+    ///
+    /// # Errors
+    ///
+    /// Storage or document-decoding errors.
+    #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
+    pub async fn oauth_subject(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.load(id).await?.and_then(|document| {
+            document
+                .get("oauth_subject")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|subject| !subject.is_empty())
+                .map(str::to_string)
+        }))
+    }
+
+    /// Bind `subject` to `id`, refusing to replace a different one.
+    ///
+    /// Answers `true` when the account already carries this subject or the
+    /// claim just succeeded, and `false` when another subject is bound. The
+    /// write is one conditional `UPDATE` (`... WHERE oauth_subject IS NULL OR
+    /// oauth_subject = ''`), so two concurrent first logins for the same
+    /// account cannot both bind: only one statement matches, and the loser
+    /// re-reads and compares. Nothing ever overwrites a non-empty subject.
+    ///
+    /// # Errors
+    ///
+    /// Storage errors from the claim or the follow-up read.
+    #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
+    pub async fn bind_oauth_subject(&self, id: &str, subject: &str) -> Result<bool> {
+        let subject = subject.trim();
+        if subject.is_empty() {
+            return Ok(false);
+        }
+        let table = self.user_table()?;
+        let column = self.user_column("oauth_subject")?;
+        let name = self.user_column("name")?;
+        let affected = self
+            .db
+            .execute(&Stmt::new(
+                format!(
+                    "UPDATE {table} SET {column} = ? \
+                     WHERE {name} = ? AND ({column} IS NULL OR {column} = '')"
+                ),
+                vec![Value::from(subject), Value::from(id)],
+            ))
+            .await?;
+        if affected.rows() > 0 {
+            return Ok(true);
+        }
+        // Either the account already carries a subject or it does not exist;
+        // comparing the stored value answers both without a write.
+        Ok(self.oauth_subject(id).await?.as_deref() == Some(subject))
+    }
+
+    /// Replace (or clear, with `None`) the stored OAuth subject.
+    ///
+    /// The administrative primitive; the login path must use
+    /// [`Self::bind_oauth_subject`] so an existing binding is never overwritten.
+    ///
+    /// # Errors
+    ///
+    /// Storage errors from the engine.
+    #[allow(clippy::result_large_err)] // `Error` is the crate-wide error type; boxing it would leak into every caller.
+    pub async fn set_oauth_subject(&self, id: &str, subject: Option<&str>) -> Result<()> {
+        let mut fields = Map::new();
+        fields.insert(
+            "oauth_subject".to_string(),
+            subject.map_or(Value::Null, Value::from),
+        );
+        self.patch(id, fields).await
+    }
+
     /// Update the last-login timestamp after a successful login.
     ///
     /// `login_count` is computed here and written through the engine, which is a
     /// read-modify-write: two concurrent logins for the same account can lose
     /// one increment (AUTH14). That is accepted deliberately — the counter is a
     /// display statistic, not a security or correctness invariant, and the row
-    /// itself lives in the engine's JSON `data` blob, so an atomic
-    /// `SET login_count = login_count + 1` is not available without bypassing
-    /// the engine as the single source of truth for the table. The `last_login`
-    /// stamp it writes is correct regardless of which concurrent writer wins.
+    /// is owned by the engine as the single source of truth for the table, so an
+    /// atomic `SET login_count = login_count + 1` would mean a hand-written
+    /// write that bypasses it. The `last_login` stamp it writes is correct
+    /// regardless of which concurrent writer wins.
     ///
     /// # Errors
     ///

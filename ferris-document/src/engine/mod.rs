@@ -4,16 +4,15 @@
 //! the dynamic REST/Desk path, so every write goes through the same lifecycle:
 //! validation, lifecycle hooks and (when a user is provided) permissions.
 //!
-//! Tables are `tab<DocType>` with fixed standard columns plus a `data` JSON
-//! blob holding the document fields. The column list is **not** written here:
-//! it lives in [`ferris_schema::migration::document_columns`], which the
-//! migration runner uses too. The engine used to carry its own copy of the
-//! `CREATE TABLE`, and the two definitions were incompatible — the migration
-//! declared `modified_by NOT NULL` and no `data`, so whichever ran first
-//! decided whether the other could work at all.
+//! Tables are `tab<DocType>` with fixed standard columns plus one real column
+//! per declared field (and one table per child table); the document `Value` is
+//! reconstructed on read. The column list is **not** written here: it lives in
+//! [`ferris_schema::migration::document_columns`], which the migration runner
+//! uses too. The engine used to carry its own copy of the `CREATE TABLE`, and
+//! the two definitions were incompatible.
 //!
-//! Storing fields as JSON keeps the layout identical for compiled DocTypes and
-//! runtime-defined ones (custom fields), at the cost of not indexing fields.
+//! There is no `data` JSON blob (ADR 0001): columns are the only source of
+//! truth, so filters and indexes see every declared field.
 
 use crate::filters::{self, ListFilter};
 use ferris_core::User;
@@ -23,7 +22,7 @@ use ferris_db::{Db, Dialect};
 use ferris_schema::DoctypeMeta;
 use ferris_schema::contract::NamingType;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// Portable list parameters for the engine (filtering happens in Rust).
 #[derive(Debug, Clone, Default)]
@@ -37,7 +36,12 @@ pub struct ListQuery {
     pub offset: Option<u32>,
     /// Column ordering: `"field"`, `"field asc"` or `"field desc"`.
     pub order_by: Option<String>,
-    /// Case-insensitive substring match over the document's string values.
+    /// Case-insensitive text match over the document's string values.
+    ///
+    /// The engine answers it from the database's native full-text index when one
+    /// is available, which is a **token** match (`alpha` finds `alpha`, not
+    /// `alphabet`); without an index it falls back to a case-insensitive
+    /// substring scan of every string leaf of the document.
     pub search: Option<String>,
     /// Restrict the result to these document names.
     ///
@@ -401,7 +405,23 @@ pub struct DocumentEngine {
     ensured: Arc<OnceLock<RwLock<HashSet<String>>>>,
 }
 
+/// The tables already ensured for each process-wide `Db` identity.
+///
+/// `DocumentEngine::new` is cheap and is called per request in the observability
+/// path; the cache must therefore outlive one engine. Keying it by `Db::id`
+/// means every clone of one pool shares the same set, and a second database in
+/// the same process starts with its own.
+static ENSURED_BY_DB: OnceLock<Mutex<HashMap<u64, Arc<OnceLock<RwLock<HashSet<String>>>>>>> =
+    OnceLock::new();
+
+fn ensured_for(db_id: u64) -> Arc<OnceLock<RwLock<HashSet<String>>>> {
+    let map = ENSURED_BY_DB.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.entry(db_id).or_default().clone()
+}
+
 mod read;
+mod search;
 mod secret;
 mod shares;
 pub(crate) mod support;

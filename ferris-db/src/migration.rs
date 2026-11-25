@@ -5,6 +5,7 @@
 //! pool while still emitting Postgres advisory locks — which is what the
 //! previous `MigrationRunner::new()` defaulting to `Dialect::Postgres` allowed.
 
+use crate::driver::PinnedConnection;
 use crate::exec::{Db, Stmt};
 use ferris_core::{DatabaseError, Error, Result, ValidationError};
 use sha2::{Digest, Sha256};
@@ -203,12 +204,16 @@ impl MigrationRunner {
     /// and this read all happen on the same session — and so a pool with a
     /// single connection (the in-memory test pool) does not deadlock trying to
     /// check out a second one.
-    async fn applied_versions_on(conn: &mut sqlx::AnyConnection) -> Result<HashMap<u32, String>> {
+    async fn applied_versions_on(
+        conn: &mut PinnedConnection,
+        dialect: crate::dialect::Dialect,
+    ) -> Result<HashMap<u32, String>> {
         let rows = crate::exec::fetch_all_on(
             conn,
             &Stmt::raw(format!(
                 "SELECT version, checksum FROM {MIGRATIONS_TABLE} ORDER BY version"
             )),
+            dialect,
         )
         .await?;
         Self::applied_from_rows(rows)
@@ -316,7 +321,9 @@ impl MigrationRunner {
         let mut conn = db.acquire().await?;
         let lock = self.acquire_lock(&mut conn, db.dialect()).await?;
 
-        let result = self.apply_locked(&mut conn, target_version).await;
+        let result = self
+            .apply_locked(&mut conn, target_version, db.dialect())
+            .await;
         // Release on **both** paths. An error after the lock was taken used to
         // return through `?` and leave the pooled session holding it, so the
         // next migration (or process) waited on a lock nobody would release.
@@ -333,13 +340,14 @@ impl MigrationRunner {
     /// The lock-holding half of [`Self::apply`].
     async fn apply_locked(
         &self,
-        conn: &mut sqlx::AnyConnection,
+        conn: &mut PinnedConnection,
         target_version: Option<u32>,
+        dialect: crate::dialect::Dialect,
     ) -> Result<Vec<MigrationResult>> {
         // `pending` is read *under* the lock: two processes booting together
         // must not both compute the same pending set before either takes the
         // lock, or the second one re-applies migrations the first just wrote.
-        let applied = Self::applied_versions_on(conn).await?;
+        let applied = Self::applied_versions_on(conn, dialect).await?;
         let pending: Vec<&Migration> = self
             .migrations
             .iter()
@@ -354,7 +362,7 @@ impl MigrationRunner {
             if target_version.is_some_and(|target| migration.version > target) {
                 break;
             }
-            results.push(run_one(conn, migration).await);
+            results.push(run_one(conn, migration, dialect).await);
         }
 
         Ok(results)
@@ -366,7 +374,7 @@ impl MigrationRunner {
     /// SQLite needs none: it serialises writers with its file lock.
     async fn acquire_lock(
         &self,
-        conn: &mut sqlx::AnyConnection,
+        conn: &mut PinnedConnection,
         dialect: crate::dialect::Dialect,
     ) -> Result<Option<Lock>> {
         use crate::dialect::Dialect;
@@ -389,6 +397,7 @@ impl MigrationRunner {
                     &Stmt::raw(format!(
                         "SELECT GET_LOCK('{MYSQL_LOCK_NAME}', 30) AS locked"
                     )),
+                    dialect,
                 )
                 .await?;
                 let locked = rows.first().and_then(|row| row.opt_i64("locked"));
@@ -397,7 +406,7 @@ impl MigrationRunner {
         }
     }
 
-    async fn release_lock(&self, conn: &mut sqlx::AnyConnection, lock: Option<Lock>) -> Result<()> {
+    async fn release_lock(&self, conn: &mut PinnedConnection, lock: Option<Lock>) -> Result<()> {
         match lock {
             None => Ok(()),
             Some(Lock::Postgres) => {
@@ -452,9 +461,13 @@ enum Lock {
 ///
 /// A failure is recorded rather than propagated so a batch reports every
 /// migration that failed, which is what makes `ferris migrate` output useful.
-async fn run_one(conn: &mut sqlx::AnyConnection, migration: &Migration) -> MigrationResult {
+async fn run_one(
+    conn: &mut PinnedConnection,
+    migration: &Migration,
+    dialect: crate::dialect::Dialect,
+) -> MigrationResult {
     let started = Instant::now();
-    let result = apply(conn, migration, started).await;
+    let result = apply(conn, migration, started, dialect).await;
     MigrationResult {
         version: migration.version,
         name: migration.name.clone(),
@@ -465,16 +478,17 @@ async fn run_one(conn: &mut sqlx::AnyConnection, migration: &Migration) -> Migra
 }
 
 async fn apply(
-    conn: &mut sqlx::AnyConnection,
+    conn: &mut PinnedConnection,
     migration: &Migration,
     started: Instant,
+    dialect: crate::dialect::Dialect,
 ) -> Result<()> {
     // The transaction is managed explicitly on the pinned connection — a
     // `Tx` would have to borrow it, and the connection is already held for the
     // whole batch. `BEGIN`/`COMMIT`/`ROLLBACK` are spelled identically by all
     // three backends.
     crate::exec::execute_script_on(conn, "BEGIN").await?;
-    let result = apply_inner(conn, migration, started).await;
+    let result = apply_inner(conn, migration, started, dialect).await;
     match &result {
         Ok(()) => crate::exec::execute_script_on(conn, "COMMIT").await?,
         Err(_) => crate::exec::execute_script_on(conn, "ROLLBACK").await?,
@@ -483,9 +497,10 @@ async fn apply(
 }
 
 async fn apply_inner(
-    conn: &mut sqlx::AnyConnection,
+    conn: &mut PinnedConnection,
     migration: &Migration,
     started: Instant,
+    dialect: crate::dialect::Dialect,
 ) -> Result<()> {
     // A migration is a script: dialect-aware DDL emits a table plus its
     // indexes, which is more than one statement.
@@ -505,6 +520,7 @@ async fn apply_inner(
                 ferris_core::Value::from(i64::try_from(elapsed_ms(started)).unwrap_or(i64::MAX)),
             ],
         ),
+        dialect,
     )
     .await?;
 

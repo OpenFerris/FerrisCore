@@ -1,4 +1,4 @@
-//! `OAuth2` HTTP endpoints — a **login**, not a token dispenser.
+//! OAuth2 + userinfo HTTP endpoints — a **login**, not a token dispenser.
 //!
 //! Wraps [`ferris_auth::OAuthManager`] behind axum routes:
 //!
@@ -21,23 +21,48 @@
 //! to read the identity from the provider's userinfo endpoint — and never reach
 //! the browser.
 //!
-//! Non-browser clients (API keys, bearer tokens, the Desk's own session) keep
+//! Non-browser clients (API keys, the Desk's own session) keep
 //! using `POST /api/auth/login` and the REST API. Provider tokens for a *third
 //! party* app would need that app's own client registration (its redirect URI
 //! and PKCE verifier), which is a different feature; riding on the SSO state
 //! store would hand out tokens with the SSO flow's trust, so it is deliberately
 //! not offered here.
 //!
+//! ## What the provider proves
+//!
+//! Identity comes from the provider's **userinfo** endpoint only. An
+//! `id_token` is not validated (no JWKS signature, no `iss`/`aud`/`nonce`), so
+//! this is OAuth2 + userinfo, not OpenID Connect; a provider configured with
+//! `oidc = true` is refused when the manager is built.
+//!
 //! ## Account resolution
 //!
-//! The provider proves an **email address**, nothing more. The local account is
-//! looked up by that email (the same `email`/`username` lookup the password
-//! login uses) and must already exist and be enabled: an unknown identity is
-//! refused instead of being auto-provisioned, because a self-service OAuth
-//! account would bypass whatever policy governs who may have an account. A local
-//! account with MFA enabled is refused too — the second factor is not something
-//! an external provider can satisfy — with a message pointing at the password
-//! login.
+//! The provider proves an **email address**, and only a verified one: unless the
+//! provider explicitly opted out (`require_verified_email = false`), userinfo
+//! must carry `email_verified: true`. A missing claim is refused, because "the
+//! provider did not say" is not "verified".
+//!
+//! The local account is looked up by that email (the same `email`/`username`
+//! lookup the password login uses) and must already exist and be enabled: an
+//! unknown identity is refused instead of being auto-provisioned, because a
+//! self-service OAuth account would bypass whatever policy governs who may have
+//! an account.
+//!
+//! A provider that returns a stable `sub` also binds it to the account on the
+//! first login; a later login presenting a different subject is refused
+//! (`this identity is linked to another account`) and an existing subject is
+//! never overwritten. A local account with MFA enabled is refused too — the
+//! second factor is not something an external provider can satisfy — with a
+//! message pointing at the password login.
+//!
+//! ## Email verification policy
+//!
+//! When `[auth] require_email_verification` is on, the provider's
+//! `email_verified: true` is the proof: it satisfies the local check, and the
+//! callback marks the local `email_verified` column as verified before opening
+//! the session (best-effort, with a warning if the write fails). A local
+//! account that is still unverified and a provider that did not verify the
+//! address is refused, same as a password login would be.
 
 use std::sync::Arc;
 
@@ -48,11 +73,14 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
+use axum_login::AuthSession;
+use ferris_auth::login::{Backend, SessionUser};
 use ferris_auth::oauth::{NEXT_COOKIE, STATE_COOKIE, clear_cookie, flow_cookie};
 use ferris_auth::{OAuthConfig, OAuthManager, SessionConfig};
 use ferris_core::{Error, Result, Value};
 use serde::Deserialize;
 use tokio::sync::Mutex;
+use tower_sessions::Session;
 use tracing::warn;
 
 use crate::session::{
@@ -63,9 +91,13 @@ use crate::session::{
 /// something that is not a local path).
 pub const DEFAULT_NEXT: &str = "/desk";
 
-/// Shared OAuth state. A tokio mutex is used because `callback` awaits while
-/// holding the manager (the state store and the token exchange must not
-/// interleave for the same flow).
+/// Shared OAuth state.
+///
+/// The tokio mutex guards the manager's pending-state store only. A callback
+/// takes the state (and a **cloned** client) under the lock and immediately
+/// drops it; the token exchange and userinfo requests run on that clone with no
+/// lock held, so a slow provider cannot block `/api/oauth/providers`, another
+/// login, or another callback.
 #[derive(Clone)]
 pub struct OAuthState {
     pub manager: Arc<Mutex<OAuthManager>>,
@@ -97,10 +129,22 @@ pub fn oauth_router(config: OAuthConfig, session: SessionHandlers) -> Result<Rou
     Ok(oauth_router_with_manager(manager, session))
 }
 
-/// Build the OAuth router from an existing manager, resolved to `Router<()>`.
+/// Build a self-contained OAuth router from an existing manager.
+///
+/// The router mounts the same `tower-sessions` + `axum-login` layer the server
+/// uses, because the callback extracts `AuthSession` and `Session`. A caller
+/// that embeds [`oauth_router_with_state`] in its own state already owns that
+/// layer and must not mount it twice.
 pub fn oauth_router_with_manager(manager: OAuthManager, session: SessionHandlers) -> Router {
+    let store = session.session_store.clone();
+    let config = session.config.clone();
+    let backend = session.backend.clone();
     let state = OAuthState::new(manager, session);
-    oauth_router_with_state().with_state(state)
+    let router = oauth_router_with_state().with_state(state);
+    match store {
+        Some(store) => router.layer(ferris_auth::login::auth_layer(&config, store, backend)),
+        None => router,
+    }
 }
 
 /// The OAuth routes as a `Router<S>`, **without** resolving the state.
@@ -143,13 +187,18 @@ async fn login(
     Query(query): Query<LoginQuery>,
 ) -> Response {
     let next = safe_next(query.next.as_deref());
-    let mut manager = state.manager.lock().await;
-    let (url, oauth_state) = match manager.authorize(&provider) {
+    // The lock covers the state write only; the state store persists the entry
+    // (memory or DB) before `authorize` answers the URL.
+    let minted = {
+        let mut manager = state.manager.lock().await;
+        let minted = manager.authorize(&provider).await;
+        let ttl = manager.state_ttl_seconds();
+        minted.map(|(url, oauth_state)| (url, oauth_state, ttl))
+    };
+    let (url, oauth_state, ttl) = match minted {
         Ok(minted) => minted,
         Err(e) => return error_response(e),
     };
-    let ttl = manager.state_ttl_seconds();
-    drop(manager);
 
     let config = &state.session.config;
     let mut response = Redirect::temporary(url.as_str()).into_response();
@@ -176,6 +225,8 @@ async fn callback(
     Path(provider): Path<String>,
     Query(query): Query<CallbackQuery>,
     headers: HeaderMap,
+    auth_session: AuthSession<Backend>,
+    session: Session,
 ) -> Response {
     let config = state.session.config.clone();
     // The state the *browser* sent. A missing or mismatched cookie means this
@@ -190,31 +241,43 @@ async fn callback(
     }
     let next = safe_next(cookie_value(&headers, NEXT_COOKIE).as_deref());
 
-    let user_info = {
+    // Take the state (single use: the store removes it before validating, so a
+    // replayed callback fails even with the cookie still in the jar) and a
+    // cloned client. The guard is dropped here, before any request leaves the
+    // process: a slow token endpoint must not hold the manager lock.
+    let pending = {
         let mut manager = state.manager.lock().await;
-        // Single use: the manager removes the state before validating it, so a
-        // replayed callback fails even with the cookie still in the jar.
-        let tokens = match manager
-            .callback(&provider, query.state.clone(), query.code)
-            .await
-        {
-            Ok(tokens) => tokens,
-            Err(e) => return error_response(e),
-        };
-        let Some(client) = manager.get_provider(&provider) else {
-            return error_response(Error::Validation(ferris_core::ValidationError::Invalid(
-                format!("Provider not found: {provider}"),
-            )));
-        };
-        let user_info = match client.get_user_info(&tokens.access_token).await {
-            Ok(info) => info,
-            Err(e) => return error_response(e),
-        };
-        // The tokens are a credential: the access token was used once, above, and
-        // neither it nor the refresh token is stored on the session or returned
-        // to the browser — they are dropped with this block.
-        user_info
+        manager.take_pending(&provider, &query.state).await
     };
+    let (client, pkce_verifier) = match pending {
+        Ok(pending) => pending,
+        Err(e) => return error_response(e),
+    };
+    let require_verified_email = client.require_verified_email();
+    let tokens = match client.exchange_code(query.code, pkce_verifier).await {
+        Ok(tokens) => tokens,
+        Err(e) => return error_response(e),
+    };
+    let user_info = match client.get_user_info(&tokens.access_token).await {
+        Ok(info) => info,
+        Err(e) => return error_response(e),
+    };
+    // The tokens are a credential: the access token was used once, above, and
+    // neither it nor the refresh token is stored on the session or returned to
+    // the browser — they are dropped with this scope.
+
+    // An unverified address must not resolve an account: whoever controls the
+    // mailbox the provider has *not* confirmed could otherwise claim it. A
+    // missing `email_verified` is refused too, unless the provider opted out.
+    if require_verified_email
+        && user_info.get("email_verified").and_then(Value::as_bool) != Some(true)
+    {
+        warn!(
+            provider = %provider,
+            "oauth userinfo did not report a verified email; refusing the login"
+        );
+        return refuse("the provider did not verify this email address", &config);
+    }
 
     let Some(email) = user_info.get("email").and_then(Value::as_str) else {
         warn!(
@@ -247,20 +310,95 @@ async fn callback(
         );
     }
 
+    // A provider-verified address is the proof the opt-in local policy asks
+    // for: it satisfies the check even while the local flag is still false, and
+    // the callback records it before opening the session. A provider that did
+    // not verify the address cannot satisfy the policy; that combination only
+    // reaches here when the provider opted out of `require_verified_email`.
+    let provider_verified = user_info.get("email_verified").and_then(Value::as_bool) == Some(true);
+    if state.session.require_email_verification && !user.email_verified {
+        if !provider_verified {
+            warn!(
+                provider = %provider,
+                "oauth login refused: the email is not verified locally or by the provider"
+            );
+            return refuse("verify your email address before signing in", &config);
+        }
+        // Best effort: the provider already proved the address, so a failed
+        // write is logged and the login continues.
+        if let Err(error) = state
+            .session
+            .user_store
+            .set_email_verified(&user.id, true)
+            .await
+        {
+            warn!(
+                user.id = %user.id,
+                %error,
+                "could not mark the oauth email as verified"
+            );
+        }
+    }
+
+    // Bind the provider's stable subject on the first login and compare it
+    // afterwards: the email alone can be reassigned upstream, the subject
+    // cannot. `bind_oauth_subject` never overwrites a non-empty value, so a
+    // second provider identity for the same account is refused instead of
+    // silently taking it over.
+    if let Some(subject) = user_info
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+    {
+        match state
+            .session
+            .user_store
+            .bind_oauth_subject(&user.id, subject)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    provider = %provider,
+                    "oauth subject does not match the account's existing binding"
+                );
+                return refuse("this identity is linked to another account", &config);
+            }
+            Err(e) => return error_response(e),
+        }
+    }
+
     let ip = client_ip(&headers);
-    let session = match start_session(&state.session, &user, Some(ip)).await {
-        Ok(session) => session,
+    let record = match state.session.user_store.login_record_by_id(&user.id).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return refuse("this account is disabled", &config),
         Err(e) => return error_response(e),
     };
+    let session_user = SessionUser::new(record.user.to_user(), record.session_auth_hash());
+    if let Err(error) = start_session(
+        &auth_session,
+        &session,
+        &state.session,
+        &session_user,
+        Some(ip),
+    )
+    .await
+    {
+        warn!(%error, "could not open the OAuth session");
+        return crate::session::internal_failure();
+    }
 
     // 303, not 302: the callback was a GET and the browser must follow it
     // with a GET to the destination (a 302 leaves the method up to the client).
     let mut response = (StatusCode::SEE_OTHER, [(header::LOCATION, next.as_str())]).into_response();
-    set_cookie(&mut response, &config.build_cookie(&session.id).to_string());
-    // The redirect cannot carry the header across the navigation, but a
-    // fetch-following client reads it here; the Desk's own bootstrap
-    // (`GET /api/auth/session`) hands it the live token either way.
-    set_csrf_token(&mut response, &session.csrf_token);
+    // The session cookie is written by `tower-sessions`. The redirect cannot
+    // carry the header across the navigation, but a fetch-following client
+    // reads it here; the Desk's own bootstrap (`GET /api/auth/session`) hands
+    // it the live token either way.
+    if let Some(csrf) = ferris_auth::login::csrf_token(&session).await {
+        set_csrf_token(&mut response, &csrf);
+    }
     set_cookie(
         &mut response,
         &clear_cookie(STATE_COOKIE, config.secure_cookies).to_string(),

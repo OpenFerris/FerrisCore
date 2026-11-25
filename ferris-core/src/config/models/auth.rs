@@ -7,15 +7,6 @@ use super::redact::Redacted;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
-    /// JWT signing secret. There is deliberately **no usable default**: it must
-    /// come from the environment — `FERRIS_JWT_SECRET`, i.e. `jwt_secret` under
-    /// the `FERRIS_` prefix [`Config::load_from`] installs (a bare `JWT_SECRET`
-    /// is *not* read here) — or an explicit config value. `None` means "not
-    /// configured" and any consumer that needs to sign/validate tokens must
-    /// fail rather than fall back to a placeholder.
-    pub jwt_secret: Option<String>,
-    pub jwt_expiry_hours: u64,
-    pub refresh_expiry_days: u64,
     pub password_min_length: usize,
     pub password_require_uppercase: bool,
     pub password_require_lowercase: bool,
@@ -23,21 +14,38 @@ pub struct AuthConfig {
     pub password_require_symbols: bool,
     pub max_login_attempts: u32,
     pub lockout_duration_minutes: u64,
-    pub mfa_enabled: bool,
     pub mfa_issuer: String,
     pub session_timeout_minutes: u64,
+    /// Sliding idle window for a session, in minutes. A session expires after
+    /// this long without a request, independently of the absolute
+    /// `session_timeout_minutes` ceiling.
+    #[serde(default = "default_session_idle_timeout_minutes")]
+    pub session_idle_timeout_minutes: u64,
     /// Concurrent sessions one user may hold. A login beyond this is refused
     /// (it never evicts an older session).
     pub max_sessions_per_user: u32,
+    /// Opt in to gating password logins on a verified email address.
+    ///
+    /// `false` (the default) keeps the historical behaviour: a verified address
+    /// is self-service only and never blocks a login. When `true`, a login for
+    /// an account whose `User.email_verified` is false is refused after the
+    /// password (and the second factor, when configured) is proven. A
+    /// provider-verified OAuth email satisfies the check and marks the local
+    /// account verified.
+    #[serde(default)]
+    pub require_email_verification: bool,
     pub oauth: OAuthConfig,
+}
+
+/// 30 minutes: the effective idle window before `[auth]` exposed the knob, so
+/// an existing config keeps behaving exactly the same.
+fn default_session_idle_timeout_minutes() -> u64 {
+    30
 }
 
 impl fmt::Debug for AuthConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthConfig")
-            .field("jwt_secret", &self.jwt_secret.as_ref().map(|_| Redacted))
-            .field("jwt_expiry_hours", &self.jwt_expiry_hours)
-            .field("refresh_expiry_days", &self.refresh_expiry_days)
             .field("password_min_length", &self.password_min_length)
             .field(
                 "password_require_uppercase",
@@ -51,9 +59,16 @@ impl fmt::Debug for AuthConfig {
             .field("password_require_symbols", &self.password_require_symbols)
             .field("max_login_attempts", &self.max_login_attempts)
             .field("lockout_duration_minutes", &self.lockout_duration_minutes)
-            .field("mfa_enabled", &self.mfa_enabled)
             .field("mfa_issuer", &self.mfa_issuer)
             .field("session_timeout_minutes", &self.session_timeout_minutes)
+            .field(
+                "session_idle_timeout_minutes",
+                &self.session_idle_timeout_minutes,
+            )
+            .field(
+                "require_email_verification",
+                &self.require_email_verification,
+            )
             .field("oauth", &self.oauth)
             .finish()
     }

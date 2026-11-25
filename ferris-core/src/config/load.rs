@@ -144,9 +144,6 @@ impl Default for ServerConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            jwt_secret: None,
-            jwt_expiry_hours: 24,
-            refresh_expiry_days: 30,
             password_min_length: 8,
             password_require_uppercase: true,
             password_require_lowercase: true,
@@ -154,10 +151,11 @@ impl Default for AuthConfig {
             password_require_symbols: false,
             max_login_attempts: 5,
             lockout_duration_minutes: 15,
-            mfa_enabled: false,
             mfa_issuer: "Ferris".into(),
             session_timeout_minutes: 60,
+            session_idle_timeout_minutes: 30,
             max_sessions_per_user: 5,
+            require_email_verification: false,
             oauth: OAuthConfig::default(),
         }
     }

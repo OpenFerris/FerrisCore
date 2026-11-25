@@ -12,8 +12,8 @@ impl DocumentEngine {
     ///
     /// The rename is one transaction on one connection: a later hook failure
     /// rolls the primary-key move back, so a hook never observes a half-renamed
-    /// document. `name` is the primary key and also lives in the `data` blob;
-    /// both are written from the same value.
+    /// document. `name` is the primary key, and the child rows that point at it
+    /// through `parent` move in the same statement pair.
     ///
     /// Only a **draft** may be renamed (DOC-15): a submitted or cancelled
     /// document's key is part of its lifecycle record, so changing it would
@@ -21,9 +21,9 @@ impl DocumentEngine {
     ///
     /// Side tables keyed by `(doctype, docname)` are **moved** with the document
     /// in the same transaction, and every declared `Link` field pointing at this
-    /// DocType is rewritten in the linking documents' JSON blobs. History,
-    /// grants, comments, likes, assignments and attachments therefore follow the
-    /// new key instead of being orphaned (DOC-03).
+    /// DocType is rewritten in its own column. History, grants, comments, likes,
+    /// assignments and attachments therefore follow the new key instead of
+    /// being orphaned (DOC-03).
     pub async fn rename(
         &self,
         ctx: &EngineContext<'_>,
@@ -42,7 +42,7 @@ impl DocumentEngine {
             )));
         }
 
-        let table = self.ensure_table(&ctx.doctype).await?;
+        let table = self.ensure_table_with(&ctx.doctype, ctx.meta).await?;
         self.ensure_runtime_tables().await?;
         let side_tables = self.existing_side_tables().await?;
         let mut tx = self.db.begin().await?;
@@ -73,7 +73,8 @@ impl DocumentEngine {
         side_tables: &[String],
     ) -> Result<Value> {
         let mut sink = WriteSink::Tx(tx);
-        let (existing, owner) = read_row_via(&mut sink, &ctx.doctype, old).await?;
+        let (existing, owner) =
+            read_row_via(&mut sink, &self.db, &ctx.doctype, old, ctx.meta).await?;
         self.authorize(
             ctx,
             old,
@@ -134,17 +135,67 @@ impl DocumentEngine {
         if let Some(user) = ctx.user.as_ref() {
             document.set("modified_by".to_string(), Value::from(user.id.clone()));
         }
-        let serialized = canonical_blob(&document)?;
+        // The declared columns are part of the row; a rename that moved only
+        // the key would leave the old name in a `Link` column and the next read
+        // would resurrect it.
+        let shape = DocShape::resolve(&self.db, &ctx.doctype, sink.dialect(), ctx.meta).await?;
+        let extra = update_set(&shape.columns, sink.dialect())?;
+        let mut params = vec![
+            Value::from(new_name),
+            Value::from(now),
+            Value::from(document.get("modified_by").and_then(Value::as_str)),
+        ];
+        params.extend(column_values(&shape.columns, &document));
+        params.push(Value::from(old));
         sink.execute(&Stmt::new(
-            format!("UPDATE {quoted} SET name = ?, data = ?, modified = ? WHERE name = ?"),
-            vec![
-                Value::from(new_name),
-                Value::from(serialized),
-                Value::from(now),
-                Value::from(old),
-            ],
+            format!(
+                "UPDATE {quoted} SET name = ?, modified = ?, \
+                 modified_by = COALESCE(?, modified_by){extra} WHERE name = ?"
+            ),
+            params,
         ))
         .await?;
+        // The index is keyed by name, so the row just moved: drop the old key
+        // and write the new one in this same transaction. `document` already
+        // carries `name = new_name`.
+        if search::ready_for(&self.db, &ctx.doctype) {
+            if let Err(error) = search::remove(&mut sink, &ctx.doctype, old).await {
+                tracing::warn!(
+                    %error,
+                    doctype = %ctx.doctype,
+                    name = old,
+                    "renamed document still present under its old name in the full-text index"
+                );
+            }
+            if let Err(error) = search::index(&mut sink, &ctx.doctype, &document).await {
+                tracing::warn!(
+                    %error,
+                    doctype = %ctx.doctype,
+                    name = %new_name,
+                    "renamed document not indexed for full-text search"
+                );
+            }
+        }
+        // The child rows key on `parent`; move them with the parent in this
+        // same transaction or a read after the rename loses every line item.
+        // The shape is the effective `Table` list, so a child declared by a
+        // `Custom Field` moves too, and it is resolved once for the whole
+        // operation instead of walking the compiled declaration again.
+        for child in &shape.tables {
+            let child_table = table_name(&child.child)?;
+            sink.execute(&Stmt::new(
+                format!(
+                    "UPDATE {} SET parent = ? WHERE parent = ? AND parenttype = ?",
+                    q(sink.dialect(), &child_table)?
+                ),
+                vec![
+                    Value::from(new_name),
+                    Value::from(old),
+                    Value::from(ctx.doctype.clone()),
+                ],
+            ))
+            .await?;
+        }
         // Every side table keyed by the document name moves with it in this
         // same transaction, so history, grants, comments, likes, assignments and
         // attachments cannot keep answering for a name that no longer exists
@@ -188,12 +239,10 @@ impl DocumentEngine {
     /// Rewrite every declared `Link` field that points at `ctx.doctype` so a
     /// rename does not leave the linking document pointing at a vanished key.
     ///
-    /// The registry is the only source of the relation: a field is a link to
-    /// this DocType when its `fieldtype` is `Link` and its `options` names this
-    /// DocType. Values live in the `data` JSON blob (links have no column), so
-    /// the update rewrites the blob of every matching row. The scan is scoped to
-    /// tables that actually exist and to DocTypes that declare such a field; a
-    /// rename is not a hot path.
+    /// A link lives in a real column; the scan reads only that column and
+    /// updates it in place. A multi-value link column stores a JSON array of
+    /// names, which is rewritten element by element. The scan is scoped to
+    /// tables that actually exist; a rename is not a hot path.
     #[allow(clippy::result_large_err)] // crate-wide `Error`; boxing it would leak into every caller
     async fn rename_links_in_tx(
         &self,
@@ -206,14 +255,17 @@ impl DocumentEngine {
             if meta.is_virtual {
                 continue;
             }
-            let link_fields: Vec<String> = meta
+            // Compiled metadata only: this runs inside the rename's transaction
+            // and must not touch the customization store (a second connection
+            // would deadlock a one-connection pool). A custom `Link` field that
+            // is not in the compiled declaration is not rewritten here.
+            let link_fields: Vec<&ferris_schema::FieldMeta> = meta
                 .fields
                 .iter()
                 .filter(|field| {
-                    field.fieldtype == "Link"
+                    normalized_fieldtype(field) == "Link"
                         && field.options.as_deref() == Some(ctx.doctype.as_str())
                 })
-                .map(|field| field.fieldname.clone())
                 .collect();
             if link_fields.is_empty() {
                 continue;
@@ -225,64 +277,67 @@ impl DocumentEngine {
                 continue;
             }
             let quoted = q(sink.dialect(), &table)?;
+            let mut select = vec![q(sink.dialect(), "name")?];
+            select.extend(
+                link_fields
+                    .iter()
+                    .map(|field| q(sink.dialect(), &field.fieldname))
+                    .collect::<Result<Vec<_>>>()?,
+            );
             let rows = sink
                 .fetch_all(&Stmt::new(
-                    format!("SELECT name, data FROM {quoted}"),
+                    format!("SELECT {} FROM {quoted}", select.join(", ")),
                     Vec::new(),
                 ))
                 .await?;
             for row in rows {
                 let row_name = row.str("name")?;
-                let blob = row.str("data")?;
-                let mut document: Value = serde_json::from_str(&blob).map_err(|error| {
-                    Error::Serialization(ferris_core::SerializationError::Json(error))
-                })?;
-                let mut changed = false;
                 for field in &link_fields {
-                    changed |= replace_link(&mut document, field, old, new_name);
+                    let Some(current) = row.opt_str(&field.fieldname) else {
+                        continue;
+                    };
+                    let Some(replaced) = replace_link_text(&current, old, new_name) else {
+                        continue;
+                    };
+                    sink.execute(&Stmt::new(
+                        format!(
+                            "UPDATE {quoted} SET {} = ? WHERE name = ?",
+                            q(sink.dialect(), &field.fieldname)?
+                        ),
+                        vec![Value::from(replaced), Value::from(row_name.clone())],
+                    ))
+                    .await?;
                 }
-                if !changed {
-                    continue;
-                }
-                sink.execute(&Stmt::new(
-                    format!("UPDATE {quoted} SET data = ? WHERE name = ?"),
-                    vec![
-                        Value::from(canonical_blob(&document)?),
-                        Value::from(row_name),
-                    ],
-                ))
-                .await?;
             }
         }
         Ok(())
     }
 }
 
-/// Replace `old` with `new_name` in one Link field, handling a single value and
-/// a multi-value (array) link field. Returns whether anything changed.
-fn replace_link(document: &mut Value, field: &str, old: &str, new_name: &str) -> bool {
-    let Value::Object(map) = document else {
-        return false;
-    };
-    match map.get_mut(field) {
-        Some(Value::String(value)) if value == old => {
-            *value = new_name.to_string();
-            true
-        }
-        Some(Value::Array(values)) => {
-            let mut changed = false;
-            for value in values {
-                if let Value::String(item) = value
-                    && item == old
-                {
-                    *item = new_name.to_string();
-                    changed = true;
-                }
-            }
-            changed
-        }
-        _ => false,
+/// Replace `old` with `new_name` in one Link column's text.
+///
+/// A single-value link is the name; a multi-value link is a JSON array of names.
+/// Returns the new text, or `None` when the column does not name `old`.
+fn replace_link_text(text: &str, old: &str, new_name: &str) -> Option<String> {
+    if text == old {
+        return Some(new_name.to_string());
     }
+    let parsed: Value = serde_json::from_str(text).ok()?;
+    let Value::Array(items) = parsed else {
+        return None;
+    };
+    let mut changed = false;
+    let items: Vec<Value> = items
+        .into_iter()
+        .map(|item| match item {
+            Value::String(name) if name == old => {
+                changed = true;
+                Value::from(new_name)
+            }
+            other => other,
+        })
+        .collect();
+    changed.then(|| serde_json::to_string(&Value::Array(items)).ok())?
 }
 
 // Tests live next to the code because the A7 patch scope lists only this file;

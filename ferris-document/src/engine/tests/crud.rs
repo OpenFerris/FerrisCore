@@ -203,6 +203,7 @@ async fn nested_write_from_an_after_insert_hook_is_not_clobbered() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
 
     // The hook re-enters the engine the way `dashlink::link` does: one write on
@@ -248,26 +249,6 @@ async fn nested_write_from_an_after_insert_hook_is_not_clobbered() {
         Some("sbx-1"),
         "the AfterInsert hook's nested write must survive the insert's trailing persist"
     );
-
-    // The removed trailing `UPDATE` was also what made a freshly created blob
-    // canonical (sorted keys); the INSERT has to carry that on its own, or the
-    // plugin's event/read-back comparison ("stored data differs from the data I
-    // was given") breaks again.
-    let row = engine
-        .db()
-        .fetch_one(&Stmt::new(
-            "SELECT data FROM tabNestedSealProbe WHERE name = ?",
-            vec![Value::from(name.clone())],
-        ))
-        .await
-        .unwrap();
-    let blob = row.str("data").unwrap();
-    let reparsed: serde_json::Value = serde_json::from_str(&blob).unwrap();
-    assert_eq!(
-        blob,
-        serde_json::to_string(&reparsed).unwrap(),
-        "the stored blob must be canonical: re-serializing it reorders nothing"
-    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -281,6 +262,7 @@ async fn test_delete_cascades_related_rows() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let ctx = EngineContext::new("ToDo", "TODO-.#####").allow_anonymous(true);
 

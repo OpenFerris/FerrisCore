@@ -225,28 +225,44 @@ async fn a_document_naming_rule_beats_the_declared_type() {
     )
     .await
     .unwrap();
-    let rule = serde_json::json!({
-        "name": "High priority tickets",
-        "document_type": "Ticket",
-        "prefix": "hi-",
-        "counter": 0,
-        "prefix_digits": 3,
-        "priority": 10,
-        "disabled": 0,
-        "apply_if": "Fieldname",
-        "fieldname": "urgent",
-    })
-    .to_string();
+    for (name, ty) in [
+        ("disabled", "BOOLEAN"),
+        ("document_type", "VARCHAR(255)"),
+        ("priority", "BIGINT"),
+        ("prefix", "VARCHAR(255)"),
+        ("prefix_digits", "BIGINT"),
+        ("digits", "BIGINT"),
+        ("counter", "BIGINT"),
+        ("apply_if", "VARCHAR(255)"),
+        ("fieldname", "VARCHAR(255)"),
+        ("condition", "TEXT"),
+    ] {
+        db.ensure_column(
+            "tabDocumentNamingRule",
+            &ferris_db::sql::Column::new(name, ty),
+        )
+        .await
+        .unwrap();
+    }
     db.execute(&Stmt::new(
-        "INSERT INTO tabDocumentNamingRule (name, owner, docstatus, creation, modified, data) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tabDocumentNamingRule \
+         (name, owner, docstatus, creation, modified, disabled, document_type, priority, \
+          prefix, prefix_digits, counter, apply_if, fieldname) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
             Value::from("High priority tickets"),
             Value::from("admin@local"),
             Value::from(0i64),
             Value::from(0i64),
             Value::from(0i64),
-            Value::from(rule),
+            Value::from(0i64),
+            Value::from("Ticket"),
+            Value::from(10i64),
+            Value::from("hi-"),
+            Value::from(3i64),
+            Value::from(0i64),
+            Value::from("Fieldname"),
+            Value::from("urgent"),
         ],
     ))
     .await

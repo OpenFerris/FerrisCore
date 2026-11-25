@@ -48,7 +48,10 @@ async-trait = "0.1.80"
 
 # Web
 axum = { version = "0.8", features = ["ws", "http1", "http2", "tokio"] }
+axum-login = "0.19"
 axum-macros = { version = "0.5" }
+tower-sessions = "0.15"
+totp-rs = { version = "6", features = ["gen_secret", "otpauth"] }
 chrono = { version = "0.4", features = ["serde"] }
 # `ferris-scheduler` interprets `scheduler.timezone` (an IANA name) when it
 # resolves cron deadlines; DST correctness needs the zone database, not a fixed

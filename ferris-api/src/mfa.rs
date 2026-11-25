@@ -21,6 +21,16 @@
 //! All three routes run inside the API router's `require_auth` layer and behind
 //! its CSRF gate: for cookie sessions the caller must present the session's
 //! `X-CSRF-Token` (as every other mutating route since ).
+//!
+//! # Re-authentication
+//!
+//! A live session is not enough to change the second factor: every one of these
+//! bodies also carries the account `password`, checked with
+//! `UserStore::verify_login` **before** anything is written. A stolen cookie
+//! (or an unlocked laptop) therefore cannot enrol an attacker's authenticator
+//! or switch MFA off. A missing or wrong password is a `400`; the disable and
+//! activate routes still require the TOTP code (or, for disable, a backup code)
+//! as well, so both factors must be proven.
 
 use std::sync::Arc;
 
@@ -38,26 +48,82 @@ use ferris_core::ValidationError;
 
 use crate::router::{ApiState, error_response};
 
-/// `POST /api/auth/mfa/enable` — request body (all fields optional).
-#[derive(Debug, Deserialize)]
+/// `POST /api/auth/mfa/enable` — request body.
+#[derive(Deserialize)]
 pub struct MfaEnableRequest {
     /// Display name embedded in the otpauth URI (defaults to the user's email).
     #[serde(default)]
     pub account_name: Option<String>,
+    /// The account password: the re-authentication proof required to change
+    /// MFA. Missing means `400`.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// `Debug` is redacted: the password must never reach a log through a formatted
+/// request. `account_name` is public display data and is kept.
+impl std::fmt::Debug for MfaEnableRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfaEnableRequest")
+            .field("account_name", &self.account_name)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// `POST /api/auth/mfa/{activate,disable}` — the code proving control of the
-/// second factor (a TOTP code, or a single-use backup code for disable).
-#[derive(Debug, Deserialize)]
+/// second factor (a TOTP code, or a single-use backup code for disable) plus
+/// the password that proves the account holder.
+#[derive(Deserialize)]
 pub struct MfaCodeRequest {
     pub code: String,
+    /// The account password: the re-authentication proof required to change
+    /// MFA. Missing means `400`.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// `Debug` is redacted: neither the current code nor the password is loggable.
+impl std::fmt::Debug for MfaCodeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfaCodeRequest")
+            .field("code", &"<redacted>")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// Prove the account password before an MFA change.
+///
+/// `UserStore::verify_login` resolves the account by email (or username), so the
+/// signed-in user's stored email is what is checked; the session's own identity
+/// has already been proven by the auth layer, and a wrong password or an unknown
+/// account both answer the same generic `400`, so this cannot be used to probe
+/// accounts.
+async fn reauthenticate(
+    store: &UserStore,
+    user: &ferris_core::User,
+    password: Option<&str>,
+) -> Result<(), Response> {
+    let Some(password) = password.filter(|password| !password.trim().is_empty()) else {
+        return Err(error_response(Error::Validation(ValidationError::Invalid(
+            "password is required to change MFA settings".to_string(),
+        ))));
+    };
+    match store.verify_login(&user.email, password).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(error_response(Error::Validation(ValidationError::Invalid(
+            "invalid password".to_string(),
+        )))),
+        Err(e) => Err(error_response(e)),
+    }
 }
 
 /// Start enabling MFA: persist a fresh secret + hashed backup codes without
 /// activating them.
 ///
 /// The plaintext backup codes are part of **this** response only; from then on
-/// only their SHA-256 hashes exist server-side.
+/// only their Argon2 hashes exist server-side.
 pub async fn enable(
     State(state): State<Arc<ApiState>>,
     user: AuthenticatedUser,
@@ -65,6 +131,9 @@ pub async fn enable(
 ) -> Response {
     let store = UserStore::new(state.pool.clone());
     let id = &user.0.id;
+    if let Err(response) = reauthenticate(&store, &user.0, req.password.as_deref()).await {
+        return response;
+    }
     match store.mfa_enabled(id).await {
         Ok(true) => {
             return error_response(Error::Validation(ValidationError::Invalid(
@@ -123,6 +192,9 @@ pub async fn activate(
 ) -> Response {
     let store = UserStore::new(state.pool.clone());
     let id = &user.0.id;
+    if let Err(response) = reauthenticate(&store, &user.0, req.password.as_deref()).await {
+        return response;
+    }
     if req.code.trim().is_empty() {
         return error_response(Error::Validation(ValidationError::Invalid(
             "missing MFA code".to_string(),
@@ -168,6 +240,9 @@ pub async fn disable(
 ) -> Response {
     let store = UserStore::new(state.pool.clone());
     let id = &user.0.id;
+    if let Err(response) = reauthenticate(&store, &user.0, req.password.as_deref()).await {
+        return response;
+    }
     if req.code.trim().is_empty() {
         return error_response(Error::Validation(ValidationError::Invalid(
             "missing MFA code".to_string(),
@@ -241,6 +316,7 @@ mod tests {
     /// `ApiState` under test shares the *same* `:memory:` database (each
     /// `memory_db()` call is a fresh, isolated database).
     async fn seeded_user(pool: ferris_db::Db) -> (ferris_auth::StoredUser, UserStore) {
+        crate::test_support::install_test_keyring();
         let store = UserStore::new(pool);
         store.init().await.unwrap();
         let user = store
@@ -267,6 +343,27 @@ mod tests {
         state.mfa.generate_totp(&totp).unwrap()
     }
 
+    /// The password [`seeded_user`] creates, sent as the re-authentication proof.
+    const PASSWORD: &str = "ferrisAdmin123";
+
+    fn proof() -> Option<String> {
+        Some(PASSWORD.to_string())
+    }
+
+    fn enable_request() -> MfaEnableRequest {
+        MfaEnableRequest {
+            account_name: None,
+            password: proof(),
+        }
+    }
+
+    fn code_request(code: &str) -> MfaCodeRequest {
+        MfaCodeRequest {
+            code: code.to_string(),
+            password: proof(),
+        }
+    }
+
     /// The full round trip: enable persists an inert secret, activate flips the
     /// flag only after the first code verifies, and disable clears everything
     /// after proving the second factor again.
@@ -278,15 +375,9 @@ mod tests {
         let me = auth_user(&user);
 
         // enable: secret + backup codes returned, flag still off.
-        let body = json_response(
-            enable(
-                State(state.clone()),
-                me.clone(),
-                Json(MfaEnableRequest { account_name: None }),
-            )
-            .await,
-        )
-        .await;
+        let body =
+            json_response(enable(State(state.clone()), me.clone(), Json(enable_request())).await)
+                .await;
         let secret = body["secret"].as_str().unwrap();
         let backup_codes: Vec<String> = body["backup_codes"]
             .as_array()
@@ -305,9 +396,7 @@ mod tests {
         let response = activate(
             State(state.clone()),
             me.clone(),
-            Json(MfaCodeRequest {
-                code: "000000".to_string(),
-            }),
+            Json(code_request("000000")),
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
@@ -318,9 +407,7 @@ mod tests {
             activate(
                 State(state.clone()),
                 me.clone(),
-                Json(MfaCodeRequest {
-                    code: totp_code(&state, secret),
-                }),
+                Json(code_request(&totp_code(&state, secret))),
             )
             .await,
         )
@@ -328,21 +415,14 @@ mod tests {
         assert!(store.mfa_enabled(&user.id).await.unwrap());
 
         // Another enable attempt is refused once the account is live.
-        let response = enable(
-            State(state.clone()),
-            me.clone(),
-            Json(MfaEnableRequest { account_name: None }),
-        )
-        .await;
+        let response = enable(State(state.clone()), me.clone(), Json(enable_request())).await;
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
 
         // Disable without a valid code is refused.
         let response = disable(
             State(state.clone()),
             me.clone(),
-            Json(MfaCodeRequest {
-                code: "000000".to_string(),
-            }),
+            Json(code_request("000000")),
         )
         .await;
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
@@ -353,9 +433,7 @@ mod tests {
             disable(
                 State(state.clone()),
                 me,
-                Json(MfaCodeRequest {
-                    code: backup_codes[0].clone(),
-                }),
+                Json(code_request(&backup_codes[0])),
             )
             .await,
         )
@@ -369,6 +447,94 @@ mod tests {
                 .unwrap(),
             "the disabling backup code was consumed once"
         );
+    }
+
+    /// Changing MFA is a re-authenticated action: the body must carry the
+    /// account password, and a missing or wrong one changes nothing.
+    #[tokio::test]
+    async fn changing_mfa_requires_the_account_password() {
+        let pool = ferris_db::memory_db().await.unwrap();
+        let (user, store) = seeded_user(pool.clone()).await;
+        let state = Arc::new(ApiState::new(pool));
+        let me = auth_user(&user);
+
+        // Missing password: enable is refused before anything is written.
+        let response = enable(
+            State(state.clone()),
+            me.clone(),
+            Json(MfaEnableRequest {
+                account_name: None,
+                password: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(store.mfa_secret(&user.id).await.unwrap().is_none());
+
+        // A wrong password is refused the same way.
+        let response = enable(
+            State(state.clone()),
+            me.clone(),
+            Json(MfaEnableRequest {
+                account_name: None,
+                password: Some("wrong-password".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(store.mfa_secret(&user.id).await.unwrap().is_none());
+
+        // With the password the secret is provisioned…
+        let body =
+            json_response(enable(State(state.clone()), me.clone(), Json(enable_request())).await)
+                .await;
+        let secret = body["secret"].as_str().unwrap().to_string();
+
+        // …but activate refuses without the password, even with a valid code.
+        let response = activate(
+            State(state.clone()),
+            me.clone(),
+            Json(MfaCodeRequest {
+                code: totp_code(&state, &secret),
+                password: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!store.mfa_enabled(&user.id).await.unwrap());
+
+        // Disable alike: no password, no write.
+        let response = disable(
+            State(state.clone()),
+            me,
+            Json(MfaCodeRequest {
+                code: totp_code(&state, &secret),
+                password: Some("wrong-password".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(store.mfa_secret(&user.id).await.unwrap().is_some());
+    }
+
+    /// Neither the code nor the password may appear in a formatted request.
+    #[test]
+    fn request_debug_redacts_the_proofs() {
+        let request = MfaCodeRequest {
+            code: "123456".to_string(),
+            password: Some("hunter2".to_string()),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("123456"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+
+        let request = MfaEnableRequest {
+            account_name: Some("Desk".to_string()),
+            password: Some("hunter2".to_string()),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(debug.contains("Desk"), "{debug}");
     }
 
     /// The manager settings the gate runs with drive the self-service window:

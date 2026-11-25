@@ -4,7 +4,7 @@ use axum::{
     Router,
     extract::FromRef,
     middleware::from_fn_with_state,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use ferris_auth::AuthState;
 use ferris_auth::middleware::require_csrf;
@@ -14,6 +14,7 @@ use super::ApiState;
 use super::doctype::{
     connections, doc_actions, meta, permission_matrix, permission_types, set_custom_permission,
 };
+use super::doctype_admin::{create as create_doctype, update as update_doctype};
 use super::methods::{batch, call_method, jsonrpc, openapi};
 use super::resource::{
     amend, cancel, create, get_one, get_single, list, list_requested_authed, neighbors, remove,
@@ -40,7 +41,7 @@ use crate::module::{Module, ModuleState};
 ///
 /// The router carries its **internal** CSRF layer: for requests
 /// authenticated by session cookie, every mutating route demands the session's
-/// `X-CSRF-Token` header; bearer-JWT callers and `GET`/`HEAD`/`OPTIONS` are
+/// `X-CSRF-Token` header; API-key callers and `GET`/`HEAD`/`OPTIONS` are
 /// exempt. The gate sits *inside* `require_auth` (which callers layer on top),
 /// so it can use `AuthState` without re-authenticating, and the public auth
 /// routes (`login`/`verify_mfa`) stay outside it on purpose.
@@ -139,6 +140,8 @@ where
         .route("/api/data/export/{doctype}", get(export))
         .route("/api/data/bulk-update/{doctype}", post(bulk_update))
         .route("/api/single/{doctype}", get(get_single).put(save_single))
+        .route("/api/doctype", post(create_doctype))
+        .route("/api/doctype/{name}", put(update_doctype))
         .route("/api/doctype/meta/{doctype}", get(meta))
         .route("/api/doctype/actions/{doctype}", get(doc_actions))
         .route(

@@ -6,7 +6,12 @@ use url::Url;
 
 use super::{OAuthProviderConfig, PkceMethod, generate_pkce_verifier};
 
-/// OAuth client wrapper
+/// Per-provider OAuth2 client.
+///
+/// `Clone` on purpose: a callback takes the client out of the manager (dropping
+/// the manager lock) and awaits the token exchange and userinfo on its own
+/// copy, so no network I/O happens while shared state is locked.
+#[derive(Clone, Debug)]
 pub struct OAuthClient {
     provider_name: String,
     config: OAuthProviderConfig,
@@ -22,6 +27,13 @@ impl OAuthClient {
             config,
             http_client,
         })
+    }
+
+    /// Whether a login through this provider must present a userinfo
+    /// `email_verified: true` before its email resolves a local account.
+    #[must_use]
+    pub const fn require_verified_email(&self) -> bool {
+        self.config.require_verified_email
     }
 
     /// Resolve the redirect URI for this provider.
@@ -190,7 +202,12 @@ impl OAuthClient {
     }
 }
 
-/// Token response
+/// Token response.
+///
+/// An `id_token` in the provider's reply is **not** deserialized: Ferris does
+/// not validate OIDC tokens (no JWKS signature check, no
+/// `iss`/`aud`/`nonce`/`exp`), so it is deliberately dropped rather than
+/// trusted. Identity comes from [`OAuthClient::get_user_info`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,

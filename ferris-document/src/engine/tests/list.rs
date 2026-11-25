@@ -250,7 +250,7 @@ fn a_blob_filter_is_reported_and_not_spliced_into_sql() {
         .unwrap()
         .sql()
         .to_string();
-    assert!(!sql.contains("status"), "{sql}");
+    assert!(!sql.contains("\"status\""), "{sql}");
     assert!(!sql.contains("WHERE"), "{sql}");
     assert!(
         !plan.is_complete(),
@@ -328,6 +328,10 @@ async fn r1_json_index_is_materialized_and_serves_the_list() {
     // for a context that carries no metadata.
     ferris_schema::register_doctype(ferris_schema::DoctypeMeta {
         name: doctype.to_string(),
+        fields: vec![
+            ferris_schema::FieldMeta::data("device_id"),
+            ferris_schema::FieldMeta::int("reading"),
+        ],
         indexes: vec![ferris_schema::IndexMeta {
             name: "idx_reads_device".to_string(),
             fields: vec!["device_id".to_string()],
@@ -345,7 +349,8 @@ async fn r1_json_index_is_materialized_and_serves_the_list() {
     // A second engine over the same database re-runs the whole DDL against
     // an existing table, columns and index. The ensures tolerate the
     // duplicate errors, so this is a no-op and the index exists exactly
-    // once — the boot-after-migrate case.
+    // once — the boot-after-migrate case. `device_id` is a declared field, so
+    // the index is over its real column.
     DocumentEngine::new(db.clone())
         .ensure_table(doctype)
         .await
@@ -357,7 +362,11 @@ async fn r1_json_index_is_materialized_and_serves_the_list() {
         ))
         .await
         .unwrap();
-    assert_eq!(indexes.count("n"), 1, "the JSON index was created once");
+    assert_eq!(
+        indexes.count("n"),
+        1,
+        "the declared index was created once on the column"
+    );
 
     let ctx = EngineContext::new(doctype, "SOLR-.#####").allow_anonymous(true);
     for device in ["DEV-0001", "DEV-0001", "DEV-0002"] {
@@ -385,16 +394,25 @@ async fn r1_json_index_is_materialized_and_serves_the_list() {
     // justify it. A residual would leave the plan incomplete and SQL would
     // not be trusted for the page at all, so `is_complete` has to hold for
     // this check to mean anything.
-    let json_fields = ferris_schema::get_doctype(doctype)
+    let columns: Vec<ferris_schema::FieldMeta> = ferris_schema::get_doctype(doctype)
+        .as_deref()
         .unwrap()
-        .json_indexed_fields();
-    assert_eq!(json_fields, vec!["device_id".to_string()]);
+        .fields
+        .iter()
+        .filter(|field| {
+            ferris_schema::doctype_columns::field_column(field, db.dialect())
+                .ok()
+                .flatten()
+                .is_some()
+        })
+        .cloned()
+        .collect();
     let plan = crate::list_sql::Plan::build(
         &params.filters,
         &params.filter_ops,
         params.search.as_deref(),
         params.order_by.as_deref(),
-        &json_fields,
+        &columns,
     )
     .0;
     assert!(

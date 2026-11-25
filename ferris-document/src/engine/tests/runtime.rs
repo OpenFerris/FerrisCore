@@ -96,6 +96,7 @@ async fn the_engine_records_version_history() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let ctx = EngineContext::new("Versioned", "V-.#####").allow_anonymous(true);
 
@@ -141,6 +142,7 @@ async fn transitions_rename_and_delete_record_history() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let meta = DoctypeMeta {
         name: "History".to_string(),
@@ -243,6 +245,7 @@ async fn a_share_grants_access_where_roles_deny() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let admin = sysadmin();
     let alice = plain_user();
@@ -319,6 +322,7 @@ async fn a_shared_document_appears_in_the_list() {
     crate::naming::NamingSeriesStore::ensure_table(&db)
         .await
         .unwrap();
+    register_common_doctypes();
     let engine = DocumentEngine::new(db.clone());
     let admin = sysadmin();
     let alice = plain_user();

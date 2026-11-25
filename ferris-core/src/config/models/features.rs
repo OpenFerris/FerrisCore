@@ -73,8 +73,9 @@ impl Default for FeatureFlags {
 /// Key material for `Secret` fields: AES-256-GCM at rest, recoverable by a
 /// trusted server-side context.
 ///
-/// The key is **not** derived from `auth.jwt_secret`: rotating the token signing
-/// key must not silently make every stored OAuth/webhook secret undecryptable.
+/// The key is **not** derived from any authentication setting: rotating a
+/// login credential must not silently make every stored OAuth/webhook secret
+/// undecryptable.
 /// Rotation is explicit — install the new key as `key` and keep the old one in
 /// `previous_keys` until every row has been rewritten.
 #[derive(Clone, Default, Serialize, Deserialize)]

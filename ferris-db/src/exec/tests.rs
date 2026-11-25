@@ -327,3 +327,66 @@ async fn execute_script_runs_several_statements() {
     assert_eq!(db.count(&Stmt::raw("SELECT * FROM a")).await.unwrap(), 0);
     assert_eq!(db.count(&Stmt::raw("SELECT * FROM b")).await.unwrap(), 0);
 }
+
+/// The pool keeps the concrete driver instead of being erased to `Any`.
+#[tokio::test]
+async fn the_pool_carries_the_concrete_backend() {
+    let db = open_unmanaged(&memory_db()).await.unwrap();
+    assert!(matches!(db.pool(), DbPool::Sqlite(_)));
+    assert_eq!(db.dialect(), Dialect::SQLite);
+}
+
+/// Binding a bool and a float reaches the driver at their own Rust types
+/// rather than as the lowered `Any` representation.
+#[tokio::test]
+async fn booleans_and_floats_bind_at_their_native_types() {
+    let db = open_unmanaged(&memory_db()).await.unwrap();
+    db.ensure_table(
+        "measurements",
+        &[
+            col("id", "INTEGER"),
+            col("enabled", "BOOLEAN"),
+            col("amount", "REAL"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    db.execute(&Stmt::new(
+        "INSERT INTO measurements (id, enabled, amount) VALUES (?, ?, ?)",
+        vec![Value::from(1_i64), Value::from(true), Value::from(1.5_f64)],
+    ))
+    .await
+    .unwrap();
+
+    let row = db
+        .fetch_one(&Stmt::raw("SELECT enabled, amount FROM measurements"))
+        .await
+        .unwrap();
+    assert!(row.bool("enabled").unwrap());
+    // 1.5 is exactly representable, so an exact comparison is meaningful.
+    #[allow(clippy::float_cmp)]
+    let amount = row.opt_f64("amount").unwrap();
+    assert_eq!(amount, 1.5);
+}
+
+/// `fetch_scalar` decodes the first column through the concrete driver.
+#[tokio::test]
+async fn fetch_scalar_decodes_the_first_column() {
+    let db = open_unmanaged(&memory_db()).await.unwrap();
+    let number = db
+        .fetch_scalar::<i64>(&Stmt::raw("SELECT 7"))
+        .await
+        .unwrap();
+    assert_eq!(number, Some(7));
+    let text = db
+        .fetch_scalar::<String>(&Stmt::raw("SELECT 'seven'"))
+        .await
+        .unwrap();
+    assert_eq!(text.as_deref(), Some("seven"));
+    let absent = db
+        .fetch_scalar::<i64>(&Stmt::raw("SELECT 7 WHERE 1 = 0"))
+        .await
+        .unwrap();
+    assert_eq!(absent, None);
+}

@@ -38,15 +38,18 @@ pub mod pool;
 pub mod row;
 pub mod sql;
 
+mod driver;
+
 #[cfg(test)]
 mod test_support;
 
 pub use dialect::Dialect;
+pub use driver::DbPool;
 pub use error::map as map_error;
 pub use exec::{Affected, Db, Stmt, Tx};
 pub use migration::{
     ChecksumMismatch, Migration, MigrationResult, MigrationRunner, calculate_checksum,
 };
 pub use pool::{create_pool, database_url, memory_db, open_unmanaged, validate as validate_pool};
-pub use row::Row;
+pub use row::{DbRow, Row};
 pub use sql::{Column, Ident, Upsert, UpsertBuilder, UpsertSet};

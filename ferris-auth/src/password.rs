@@ -1,42 +1,24 @@
 //! Password hashing and verification using Argon2
+//!
+//! The policy — what a human-chosen password may be, plus the Argon2 parameter
+//! bounds — lives in `config`; this module owns hashing, verification and
+//! rehashing. Both halves stay reachable as `ferris_auth::password::*` through
+//! the re-exports below.
 
 use argon2::{
     Algorithm, Argon2, Params, Version,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 use ferris_core::{ConfigError, Error, Result};
-use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::OnceLock;
 
-/// Password configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PasswordConfig {
-    pub min_length: usize,
-    pub require_uppercase: bool,
-    pub require_lowercase: bool,
-    pub require_numbers: bool,
-    pub require_symbols: bool,
-    pub max_length: usize,
-    pub argon2_memory_kib: u32,
-    pub argon2_iterations: u32,
-    pub argon2_parallelism: u32,
-}
+mod config;
 
-impl Default for PasswordConfig {
-    fn default() -> Self {
-        Self {
-            min_length: 8,
-            require_uppercase: true,
-            require_lowercase: true,
-            require_numbers: true,
-            require_symbols: false,
-            max_length: 128,
-            argon2_memory_kib: 65536, // 64 MB
-            argon2_iterations: 3,
-            argon2_parallelism: 4,
-        }
-    }
-}
+pub use config::{
+    MAX_ARGON2_ITERATIONS, MAX_ARGON2_MEMORY_KIB, MAX_ARGON2_PARALLELISM, MIN_ARGON2_MEMORY_KIB,
+    PasswordConfig, validate_password,
+};
 
 /// Password hashing errors
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,38 +67,6 @@ impl From<PasswordError> for Error {
     }
 }
 
-/// Validate password against policy
-pub fn validate_password(
-    password: &str,
-    config: &PasswordConfig,
-) -> std::result::Result<(), PasswordError> {
-    if password.len() < config.min_length {
-        return Err(PasswordError::TooShort(config.min_length));
-    }
-
-    if password.len() > config.max_length {
-        return Err(PasswordError::TooLong(config.max_length));
-    }
-
-    if config.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
-        return Err(PasswordError::MissingUppercase);
-    }
-
-    if config.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
-        return Err(PasswordError::MissingLowercase);
-    }
-
-    if config.require_numbers && !password.chars().any(|c| c.is_ascii_digit()) {
-        return Err(PasswordError::MissingNumber);
-    }
-
-    if config.require_symbols && !password.chars().any(|c| c.is_ascii_punctuation()) {
-        return Err(PasswordError::MissingSymbol);
-    }
-
-    Ok(())
-}
-
 /// Hash a password using Argon2
 pub fn hash_password(password: &str, config: &PasswordConfig) -> Result<String> {
     // Validate password first
@@ -137,9 +87,10 @@ pub fn hash_password(password: &str, config: &PasswordConfig) -> Result<String> 
 ///
 /// # Errors
 ///
-/// [`ConfigError::Invalid`] for an unusable Argon2 parameter set, or
-/// [`PasswordError::HashingFailed`].
+/// [`ConfigError::Invalid`] for an unusable Argon2 parameter set (see
+/// [`PasswordConfig::validate`]), or [`PasswordError::HashingFailed`].
 pub fn hash_secret(secret: &str, config: &PasswordConfig) -> Result<String> {
+    config.validate()?;
     let argon2 = Argon2::new(
         Algorithm::Argon2id,
         Version::V0x13,
@@ -176,17 +127,26 @@ pub fn hash_secret_default(secret: &str) -> Result<String> {
     hash_secret(secret, &PasswordConfig::default())
 }
 
-/// Hard cap on the input length accepted by [`verify_password`].
+/// Hard cap on the input length accepted by [`verify_password`], in
+/// **characters**.
 ///
 /// Argon2 allocates and processes memory proportional to the input; without a
 /// cap an attacker can force expensive work with huge payloads. Passwords are
-/// validated at hash time (`PasswordConfig::max_length`), so anything beyond
-/// this bound can never match a legitimately stored hash.
+/// validated at hash time (`PasswordConfig::max_length`, which
+/// [`PasswordConfig::validate`] keeps at or below this value), so anything
+/// beyond this bound can never match a legitimately stored hash. Counting
+/// characters rather than bytes keeps the cap in the same unit as the policy;
+/// the byte cost is bounded by four times this number for UTF-8 input.
 pub const MAX_VERIFY_PASSWORD_LEN: usize = 1024;
 
-/// Verify a password against a hash
+/// Verify a password against a hash.
+///
+/// # Errors
+///
+/// [`PasswordError::VerificationFailed`] when the stored value is not a valid
+/// PHC hash.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
-    if password.len() > MAX_VERIFY_PASSWORD_LEN {
+    if password.chars().count() > MAX_VERIFY_PASSWORD_LEN {
         return Ok(false);
     }
 
@@ -202,17 +162,63 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
     }
 }
 
-/// Hash a password with default config
+/// The policy the process-wide `Password`-field hasher applies.
+///
+/// `ferris_core::password::set_password_hasher` takes a bare function pointer,
+/// so the deployment's `[auth]` policy cannot travel with it as a captured
+/// value. It is recorded here, once, before the hasher is installed.
+static ACTIVE_PASSWORD_POLICY: OnceLock<PasswordConfig> = OnceLock::new();
+
+/// Record the `[auth]` policy used by [`hash_password_configured`].
+///
+/// Returns `false` when a policy was already recorded: the first boot wins, so
+/// a second boot sequence in the same process cannot change the rules under
+/// which the stored hashes were produced.
+pub fn install_password_policy(config: PasswordConfig) -> bool {
+    ACTIVE_PASSWORD_POLICY.set(config).is_ok()
+}
+
+/// The hasher installed through `ferris_core::password::set_password_hasher`.
+///
+/// Falls back to [`hash_password_default`] when no policy was recorded, which
+/// keeps the historical behaviour for callers (and tests) that never call
+/// [`install_password_policy`].
+///
+/// # Errors
+///
+/// The configured policy rejects the password, or Argon2 fails.
+pub fn hash_password_configured(password: &str) -> Result<String> {
+    match ACTIVE_PASSWORD_POLICY.get() {
+        Some(config) => hash_password(password, config),
+        None => hash_password_default(password),
+    }
+}
+
+/// Hash a password with default config.
+///
+/// # Errors
+///
+/// The default policy rejects the password, or Argon2 fails.
 pub fn hash_password_default(password: &str) -> Result<String> {
     hash_password(password, &PasswordConfig::default())
 }
 
-/// Verify a password with default config
+/// Verify a password with default config.
+///
+/// # Errors
+///
+/// [`PasswordError::VerificationFailed`] when the stored value is not a valid
+/// PHC hash.
 pub fn verify_password_default(password: &str, hash: &str) -> Result<bool> {
     verify_password(password, hash)
 }
 
-/// Generate a secure random password
+/// Generate a secure random password.
+///
+/// # Errors
+///
+/// The generated value does not satisfy `config` (a configuration with an
+/// impossible combination, for example).
 pub fn generate_password(length: usize, config: &PasswordConfig) -> Result<String> {
     use rand::Rng;
     use rand::distributions::{Alphanumeric, DistString};
@@ -236,7 +242,7 @@ pub fn generate_password(length: usize, config: &PasswordConfig) -> Result<Strin
             symbols
                 .chars()
                 .nth(rng.gen_range(0..symbols.len()))
-                .unwrap(),
+                .unwrap_or('!'),
         );
     }
 
@@ -300,38 +306,6 @@ pub fn needs_rehash(hash: &str, config: &PasswordConfig) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_password_validation() {
-        let config = PasswordConfig::default();
-
-        // Valid password
-        assert!(validate_password("Password123", &config).is_ok());
-
-        // Too short
-        assert!(matches!(
-            validate_password("Pass1", &config),
-            Err(PasswordError::TooShort(_))
-        ));
-
-        // Missing uppercase
-        assert!(matches!(
-            validate_password("password123", &config),
-            Err(PasswordError::MissingUppercase)
-        ));
-
-        // Missing lowercase
-        assert!(matches!(
-            validate_password("PASSWORD123", &config),
-            Err(PasswordError::MissingLowercase)
-        ));
-
-        // Missing number
-        assert!(matches!(
-            validate_password("Password", &config),
-            Err(PasswordError::MissingNumber)
-        ));
-    }
 
     #[test]
     fn test_hash_and_verify() {

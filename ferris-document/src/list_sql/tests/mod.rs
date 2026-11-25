@@ -24,5 +24,5 @@ fn op(field: &str, op: FilterOp, value: &str) -> ListFilter {
     }
 }
 
-mod index;
+mod columns;
 mod pushdown;

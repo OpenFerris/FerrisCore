@@ -790,6 +790,41 @@ mod tests {
         assert_eq!(en_keys, es_keys, "en.toml and es.toml must stay in sync");
     }
 
+    /// The auth hardening added fields to `User` and `User Invitation`; every
+    /// visible field needs a label in both catalogues, and the replaced
+    /// `expires_on` key must not linger.
+    #[test]
+    fn auth_hardening_labels_are_present() {
+        let labels = [
+            "field.User.mfa_last_step.label",
+            "field.User.oauth_subject.label",
+            "field.User.email_verified.label",
+            "field.User.email_verification_key.label",
+            "field.User.email_verification_expires_at.label",
+            "field.User.reset_password_expires_at.label",
+            "field.User Invitation.token_hash.label",
+            "field.User Invitation.expires_at.label",
+            "field.User Invitation.invited_by.label",
+            "field.User Invitation.accepted_at.label",
+        ];
+        let i18n = i18n();
+        for tag in ["en", "es"] {
+            let catalog = i18n.catalogs.get(tag).expect("catalogue");
+            for key in labels {
+                let value = catalog.get(key).unwrap_or_else(|| {
+                    panic!("{tag}.meta.toml is missing {key}");
+                });
+                assert!(!value.is_empty(), "{tag}.meta.toml has an empty {key}");
+            }
+            assert!(
+                catalog
+                    .get("field.User Invitation.expires_on.label")
+                    .is_none(),
+                "{tag}.meta.toml still declares the orphan expires_on label"
+            );
+        }
+    }
+
     #[test]
     fn required_desk_keys_are_present() {
         let required = [

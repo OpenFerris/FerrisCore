@@ -15,8 +15,9 @@ pub fn validate_field(
     value: &Value,
     field_meta: &ferris_schema::registry::FieldMeta,
 ) -> Result<()> {
-    // Required check
-    if field_meta.reqd && value.is_null() {
+    // Required check. The Desk sends `""` for a cleared input, not `null`, so
+    // testing only `is_null` let an empty required field through.
+    if field_meta.reqd && (value.is_null() || value.as_str().is_some_and(str::is_empty)) {
         return Err(ferris_core::Error::Validation(
             ferris_core::ValidationError::Required(
                 field_meta

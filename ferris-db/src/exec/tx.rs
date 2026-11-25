@@ -4,13 +4,26 @@
 //! connection) and this one holds another (a transaction on it). `Tx` is
 //! re-exported from [`crate::exec`] so every existing `crate::exec::Tx` path
 //! still resolves.
+//!
+//! The open transaction is kept in a private per-driver enum. The public shape
+//! is still the plain `Tx` handle: `commit` and `rollback` take `&mut self` and
+//! flip the handle to finished, which is only sound if the finished state
+//! cannot be constructed from outside — hence the private enum behind the
+//! `Option`, rather than `Option<Transaction<…>>` in a public variant.
 
 use crate::dialect::Dialect;
-use crate::error;
+use crate::driver::{self, DbPool};
 use crate::exec::{Affected, Stmt};
 use crate::row::Row;
-use ferris_core::{Error, Result};
-use sqlx::Any;
+use ferris_core::{DatabaseError, Error, Result};
+use sqlx::{MySql, Postgres, Sqlite, Transaction};
+
+/// The open driver transaction, per backend.
+enum TxInner {
+    Sqlite(Transaction<'static, Sqlite>),
+    Postgres(Transaction<'static, Postgres>),
+    MySql(Transaction<'static, MySql>),
+}
 
 /// An open transaction.
 ///
@@ -18,7 +31,7 @@ use sqlx::Any;
 /// the connection, so releasing the handle is enough and there is nothing
 /// useful to do from `Drop`.
 pub struct Tx {
-    inner: Option<sqlx::Transaction<'static, Any>>,
+    inner: Option<TxInner>,
     dialect: Dialect,
 }
 
@@ -35,28 +48,61 @@ impl std::fmt::Debug for Tx {
 }
 
 fn completed() -> Error {
-    Error::Database(ferris_core::error::DatabaseError::Transaction(
+    Error::Database(DatabaseError::Transaction(
         "Transaction already completed".into(),
     ))
 }
 
 impl Tx {
-    /// Wrap an open driver transaction together with the dialect it speaks.
-    pub(crate) fn new(inner: sqlx::Transaction<'static, Any>, dialect: Dialect) -> Self {
-        Self {
-            inner: Some(inner),
-            dialect,
+    /// Begin a transaction on `pool`, carrying the dialect of its backend.
+    pub(crate) async fn begin(pool: &DbPool) -> Result<Self> {
+        match pool {
+            DbPool::Sqlite(pool) => Ok(Self::sqlite(
+                pool.begin()
+                    .await
+                    .map_err(|error| transaction_error(&error))?,
+            )),
+            DbPool::Postgres(pool) => Ok(Self::postgres(
+                pool.begin()
+                    .await
+                    .map_err(|error| transaction_error(&error))?,
+            )),
+            DbPool::MySql(pool) => Ok(Self::mysql(
+                pool.begin()
+                    .await
+                    .map_err(|error| transaction_error(&error))?,
+            )),
         }
     }
 
-    /// The connection this transaction runs on.
+    fn sqlite(inner: Transaction<'static, Sqlite>) -> Self {
+        Self {
+            inner: Some(TxInner::Sqlite(inner)),
+            dialect: Dialect::SQLite,
+        }
+    }
+
+    fn postgres(inner: Transaction<'static, Postgres>) -> Self {
+        Self {
+            inner: Some(TxInner::Postgres(inner)),
+            dialect: Dialect::Postgres,
+        }
+    }
+
+    fn mysql(inner: Transaction<'static, MySql>) -> Self {
+        Self {
+            inner: Some(TxInner::MySql(inner)),
+            dialect: Dialect::MySQL,
+        }
+    }
+
+    /// The open transaction, or the "already completed" error.
     ///
     /// `sqlx::Transaction` implements `Deref` to its connection, and the
     /// `Executor` bound is on that connection rather than on the transaction,
-    /// so every statement goes through here.
-    fn inner_mut(&mut self) -> Result<&mut sqlx::AnyConnection> {
-        let tx = self.inner.as_mut().ok_or_else(completed)?;
-        Ok(&mut **tx)
+    /// so every statement goes through the dereference at the call site.
+    fn inner_mut(&mut self) -> Result<&mut TxInner> {
+        self.inner.as_mut().ok_or_else(completed)
     }
 
     pub fn dialect(&self) -> Dialect {
@@ -69,46 +115,58 @@ impl Tx {
     }
 
     pub async fn execute(&mut self, stmt: &Stmt) -> Result<Affected> {
-        let inner = self.inner_mut()?;
-        stmt.query()
-            .execute(&mut *inner)
-            .await
-            .map(|r| Affected(r.rows_affected()))
-            .map_err(error::map)
+        let stmt = stmt.for_dialect(self.dialect);
+        match self.inner_mut()? {
+            TxInner::Sqlite(tx) => driver::execute::<Sqlite, _>(&mut **tx, stmt.as_ref()).await,
+            TxInner::Postgres(tx) => driver::execute::<Postgres, _>(&mut **tx, stmt.as_ref()).await,
+            TxInner::MySql(tx) => driver::execute::<MySql, _>(&mut **tx, stmt.as_ref()).await,
+        }
     }
 
     /// Run a multi-statement script inside the transaction.
     pub async fn execute_script(&mut self, sql: &str) -> Result<()> {
-        let inner = self.inner_mut()?;
-        sqlx::raw_sql(sql)
-            .execute(&mut *inner)
-            .await
-            .map(|_| ())
-            .map_err(error::map)
+        match self.inner_mut()? {
+            TxInner::Sqlite(tx) => driver::script::<Sqlite, _>(&mut **tx, sql).await,
+            TxInner::Postgres(tx) => driver::script::<Postgres, _>(&mut **tx, sql).await,
+            TxInner::MySql(tx) => driver::script::<MySql, _>(&mut **tx, sql).await,
+        }
     }
 
     pub async fn fetch_all(&mut self, stmt: &Stmt) -> Result<Vec<Row>> {
-        let inner = self.inner_mut()?;
-        let rows = stmt
-            .query()
-            .fetch_all(&mut *inner)
-            .await
-            .map_err(error::map)?;
-        Ok(rows.into_iter().map(Row::new).collect())
+        let stmt = stmt.for_dialect(self.dialect);
+        match self.inner_mut()? {
+            TxInner::Sqlite(tx) => driver::fetch_all::<Sqlite, _>(&mut **tx, stmt.as_ref()).await,
+            TxInner::Postgres(tx) => {
+                driver::fetch_all::<Postgres, _>(&mut **tx, stmt.as_ref()).await
+            }
+            TxInner::MySql(tx) => driver::fetch_all::<MySql, _>(&mut **tx, stmt.as_ref()).await,
+        }
     }
 
     pub async fn fetch_optional(&mut self, stmt: &Stmt) -> Result<Option<Row>> {
-        let row = stmt.query().fetch_optional(self.inner_mut()?).await;
-        crate::row::optional(row).map(|r| r.map(Row::new))
+        let stmt = stmt.for_dialect(self.dialect);
+        match self.inner_mut()? {
+            TxInner::Sqlite(tx) => {
+                driver::fetch_optional::<Sqlite, _>(&mut **tx, stmt.as_ref()).await
+            }
+            TxInner::Postgres(tx) => {
+                driver::fetch_optional::<Postgres, _>(&mut **tx, stmt.as_ref()).await
+            }
+            TxInner::MySql(tx) => {
+                driver::fetch_optional::<MySql, _>(&mut **tx, stmt.as_ref()).await
+            }
+        }
     }
 
     pub async fn fetch_one(&mut self, stmt: &Stmt) -> Result<Row> {
-        let row = stmt
-            .query()
-            .fetch_one(self.inner_mut()?)
-            .await
-            .map_err(error::map)?;
-        Ok(Row::new(row))
+        let stmt = stmt.for_dialect(self.dialect);
+        match self.inner_mut()? {
+            TxInner::Sqlite(tx) => driver::fetch_one::<Sqlite, _>(&mut **tx, stmt.as_ref()).await,
+            TxInner::Postgres(tx) => {
+                driver::fetch_one::<Postgres, _>(&mut **tx, stmt.as_ref()).await
+            }
+            TxInner::MySql(tx) => driver::fetch_one::<MySql, _>(&mut **tx, stmt.as_ref()).await,
+        }
     }
 
     pub async fn count(&mut self, stmt: &Stmt) -> Result<u64> {
@@ -124,19 +182,34 @@ impl Tx {
 
     /// Commit. Errors if the transaction is already finished.
     pub async fn commit(&mut self) -> Result<()> {
-        let tx = self.inner.take().ok_or_else(completed)?;
-        tx.commit().await.map_err(|e| transaction_error(&e))
+        let inner = self.inner.take().ok_or_else(completed)?;
+        match inner {
+            TxInner::Sqlite(tx) => tx.commit().await.map_err(|error| transaction_error(&error)),
+            TxInner::Postgres(tx) => tx.commit().await.map_err(|error| transaction_error(&error)),
+            TxInner::MySql(tx) => tx.commit().await.map_err(|error| transaction_error(&error)),
+        }
     }
 
     /// Roll back. Errors if the transaction is already finished.
     pub async fn rollback(&mut self) -> Result<()> {
-        let tx = self.inner.take().ok_or_else(completed)?;
-        tx.rollback().await.map_err(|e| transaction_error(&e))
+        let inner = self.inner.take().ok_or_else(completed)?;
+        match inner {
+            TxInner::Sqlite(tx) => tx
+                .rollback()
+                .await
+                .map_err(|error| transaction_error(&error)),
+            TxInner::Postgres(tx) => tx
+                .rollback()
+                .await
+                .map_err(|error| transaction_error(&error)),
+            TxInner::MySql(tx) => tx
+                .rollback()
+                .await
+                .map_err(|error| transaction_error(&error)),
+        }
     }
 }
 
 fn transaction_error(e: &sqlx::Error) -> Error {
-    Error::Database(ferris_core::error::DatabaseError::Transaction(
-        e.to_string(),
-    ))
+    Error::Database(DatabaseError::Transaction(e.to_string()))
 }

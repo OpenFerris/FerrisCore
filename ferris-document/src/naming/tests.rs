@@ -82,15 +82,14 @@ async fn amend_names_take_the_next_counter() {
         .unwrap();
     for name in ["T-1", "T-1-1", "T-1-2", "T-1-4", "T-10-other"] {
         db.execute(&Stmt::new(
-            "INSERT INTO tabTicket (name, owner, docstatus, creation, modified, data) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tabTicket (name, owner, docstatus, creation, modified) \
+                 VALUES (?, ?, ?, ?, ?)",
             vec![
                 Value::from(name),
                 Value::from("admin@local"),
                 Value::from(0_i64),
                 Value::from(0_i64),
                 Value::from(0_i64),
-                Value::from("{}"),
             ],
         ))
         .await

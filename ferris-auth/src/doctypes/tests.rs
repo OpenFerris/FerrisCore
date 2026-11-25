@@ -71,10 +71,11 @@ fn user_credentials_are_password_fields_and_admin_only() {
     }
 }
 
-/// The `DocPerm` and `Session` rows the stores persist are now engine
-/// documents, and the session's CSRF token is a credential.
+/// `DocPerm` is still an engine document. `Session` is **not**: sessions live
+/// in `tab_session_store` and are owned by `tower-sessions`, so declaring the
+/// old DocType would be a second store.
 #[test]
-fn docperm_and_session_are_declared_with_properties() {
+fn docperm_is_declared_and_the_old_session_doctype_is_gone() {
     register_doctypes();
 
     let docperm = get_doctype("DocPerm").expect("DocPerm registered");
@@ -85,24 +86,61 @@ fn docperm_and_session_are_declared_with_properties() {
         "DocPerm is infrastructure, not a workspace item"
     );
 
-    let session = get_doctype("Session").expect("Session registered");
     assert!(
-        session.hidden,
-        "Session is infrastructure, not a workspace item"
+        get_doctype("Session").is_none(),
+        "the custom Session DocType must not come back alongside tab_session_store"
     );
-    let csrf = session
-        .fields
-        .iter()
-        .find(|f| f.fieldname == "csrf_token")
-        .expect("csrf_token field");
-    assert_eq!(csrf.permlevel, 1);
-    assert!(csrf.hidden);
 }
 
-/// `API Key` is a Ferris extension (Frappe keeps keys on `User`); its secret
-/// is a `Password` credential at `permlevel` 1 and the table is hidden.
+/// Roles are the `User.roles` JSON array; no child table grants a role. The
+/// `Has Role` table is kept only as the `Workspace.roles` target, so it must be
+/// declared (the registry and the reserved-name set expect it) and must grant
+/// nothing.
 #[test]
-fn api_key_secret_is_a_password_field_admin_only() {
+fn user_roles_json_is_the_only_role_grant() {
+    register_doctypes();
+    let meta = user_meta();
+    let roles = meta
+        .fields
+        .iter()
+        .find(|f| f.fieldname == "roles")
+        .expect("roles field");
+    assert_eq!(roles.fieldtype, "Small Text");
+    assert!(
+        !meta
+            .fields
+            .iter()
+            .any(|f| f.fieldtype == "Table" || f.fieldtype == "Table MultiSelect"),
+        "no User child table may grant a role"
+    );
+
+    let has_role = get_doctype("Has Role").expect("Has Role is the Workspace child table");
+    assert!(has_role.is_child_table);
+    assert!(
+        has_role.permissions.is_empty(),
+        "a child table carries no permissions, and Has Role must not grant access"
+    );
+}
+
+/// `Access Log` is written by the host (`ferris-files` emits the event and the
+/// server's sink inserts the row), so it stays declared and visible rather than
+/// being pruned as dead metadata.
+#[test]
+fn access_log_is_declared_for_the_host_writer() {
+    register_doctypes();
+    let meta = get_doctype("Access Log").expect("Access Log registered");
+    assert!(meta.read_only);
+    assert!(
+        !meta.hidden,
+        "Access Log is a live workspace log, not hidden infrastructure"
+    );
+}
+
+/// `API Key` is a Ferris extension (Frappe keeps keys on `User`); its secret is
+/// a SHA-256 digest stored as `Data` at `permlevel` 1, `key` is unique, and the
+/// table is hidden.
+#[test]
+fn api_key_secret_is_a_hidden_data_digest_admin_only() {
     let meta = api_key_meta();
     assert!(
         meta.hidden,
@@ -113,7 +151,19 @@ fn api_key_secret_is_a_password_field_admin_only() {
         .iter()
         .find(|f| f.fieldname == "secret_hash")
         .expect("secret_hash field");
-    assert_eq!(secret.fieldtype, "Password");
+    assert_eq!(
+        secret.fieldtype, "Data",
+        "the manager writes a digest; a Password field would hash it again"
+    );
+    assert!(secret.read_only);
+    assert!(secret.reqd);
     assert_eq!(secret.permlevel, 1);
     assert!(secret.hidden);
+
+    assert!(
+        meta.indexes
+            .iter()
+            .any(|index| index.unique && index.fields == ["key"]),
+        "the public key identifier must be unique"
+    );
 }

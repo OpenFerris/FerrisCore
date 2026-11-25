@@ -1,6 +1,7 @@
 //! Ferris API - generic REST layer over the JSON document store.
 
 pub mod activity;
+pub mod api_keys;
 pub mod authz;
 pub mod collab;
 pub mod core_doctypes;
@@ -14,10 +15,12 @@ pub mod data;
 pub mod desired_state;
 pub mod desk;
 pub mod doc_meta;
+pub mod doctype_admin;
 pub mod doctypes;
 pub mod engagement;
 pub mod form_tours;
 pub mod graphql;
+pub mod invitation;
 pub mod log;
 pub mod method;
 pub mod mfa;
@@ -28,6 +31,7 @@ pub mod oauth;
 pub mod openapi;
 pub mod panel;
 pub mod permission_admin;
+pub mod recovery;
 pub mod router;
 pub mod rpc;
 pub mod seed;
@@ -45,6 +49,7 @@ pub mod workspace_store;
 pub mod workspaces;
 
 pub use activity::activity;
+pub use api_keys::{create_api_key, delete_api_key, list_api_keys};
 pub use authz::{PolicyInstall, PolicySource, install_policies, install_policies_from_path};
 pub use collab::{
     add_assignment, add_attachment, add_share, list_assignments, list_attachments, list_shares,
@@ -60,6 +65,7 @@ pub use desired_state::{DesiredState, DesiredStateStore, PublishOutcome};
 pub use desk::{modules, search};
 pub use engagement::{add_comment, engagement, list_comments, toggle_like};
 pub use graphql::{GraphQlError, GraphQlRequest, GraphQlResponse, execute_query};
+pub use invitation::{accept_invitation, create_invitation, delete_invitation, list_invitations};
 pub use log::client_report;
 pub use method::{MethodHandler, MethodRegistry};
 pub use mfa::{activate, disable, enable};
@@ -71,6 +77,10 @@ pub use openapi::openapi_spec;
 pub use panel::{
     events, get_notification_settings, mark_notifications_read, notifications,
     put_notification_settings,
+};
+pub use recovery::{
+    confirm_email_verification, confirm_password_reset, request_email_verification,
+    request_password_reset,
 };
 pub use router::{ApiState, api_router_with_app_state, api_router_with_modules};
 pub use rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, dispatch, dispatch_batch};
@@ -88,6 +98,9 @@ pub use types::{ApiError, ListParams, ListResponse, Order};
 pub use ui::ui_extensions;
 pub use widgets::{script_by_name, script_by_path, stylesheet_by_name};
 pub use workspace_store::{WorkspaceSeedReport, load_workspaces, seed_workspaces};
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 /// The canonical wire contract, re-exported so `ferris-api` and `ferris-web`
 /// can name the same types without either having to depend on `ferris-schema`

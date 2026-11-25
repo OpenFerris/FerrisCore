@@ -4,6 +4,7 @@
 //! by commit 2013f3d.
 
 use super::*;
+use crate::Stmt;
 use ferris_core::config::SslMode;
 
 fn config(r#type: DatabaseType) -> DatabaseConfig {
@@ -92,4 +93,53 @@ async fn an_in_memory_pool_is_usable_and_reports_its_dialect() {
     let db = open_unmanaged(&cfg).await.expect("pool opens");
     assert_eq!(db.dialect(), Dialect::SQLite);
     db.health_check().await.expect("ping succeeds");
+}
+
+/// The SQLite connection applies the pragmas that keep a write-heavy install
+/// from serializing on the default rollback journal and a 2 MiB page cache.
+#[tokio::test]
+async fn sqlite_connection_pragmas_are_applied() {
+    let db = memory_db().await.unwrap();
+    let foreign_keys = db
+        .fetch_one(&Stmt::raw("PRAGMA foreign_keys"))
+        .await
+        .unwrap();
+    assert_eq!(foreign_keys.opt_i64("foreign_keys"), Some(1));
+    let busy = db
+        .fetch_one(&Stmt::raw("PRAGMA busy_timeout"))
+        .await
+        .unwrap();
+    assert_eq!(busy.opt_i64("timeout"), Some(5000));
+    let cache = db.fetch_one(&Stmt::raw("PRAGMA cache_size")).await.unwrap();
+    assert_eq!(cache.opt_i64("cache_size"), Some(-16000));
+}
+
+/// A file-backed SQLite database opens in WAL mode, not the rollback journal
+/// that serializes every reader behind the writer.
+#[tokio::test]
+async fn a_sqlite_file_uses_wal() {
+    let path = std::env::temp_dir().join(format!(
+        "ferris-wal-{}-{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |value| value.as_nanos())
+    ));
+    let config = DatabaseConfig {
+        r#type: DatabaseType::SQLite,
+        name: path.to_string_lossy().into_owned(),
+        max_connections: 2,
+        min_connections: 0,
+        ..DatabaseConfig::default()
+    };
+    let db = open_unmanaged(&config).await.expect("the file opens");
+    let mode = db
+        .fetch_one(&Stmt::raw("PRAGMA journal_mode"))
+        .await
+        .expect("journal_mode");
+    assert_eq!(mode.opt_str("journal_mode").as_deref(), Some("wal"));
+    db.close().await;
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(path.with_extension("db-shm"));
 }
